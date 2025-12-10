@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+.venv
+env/
+venv/
+
+# Tooling
+.agent/
+.vscode/
+.idea/
+
+# Documentation and Trash
+docs/
+
+# Logs and Data
+*.log
+activity_log.json
+allowed_users.json
+known_models.json
+
+# Scripts
+deploy.ps1
+main/deploy.ps1
