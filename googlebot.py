@@ -1163,8 +1163,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if stripped == '.':
+        # Проверяем, был ли активен режим генерации
+        was_in_mode = user_modes.get(user_id)
         reset_session(user_id)
-        await update.message.reply_text("🔄 Контекст сброшен.", reply_to_message_id=update.message.message_id)
+        if was_in_mode == 'image_gen':
+            await update.message.reply_text("🔄 Режим генерации отменён.", reply_to_message_id=update.message.message_id)
+        elif was_in_mode == 'image_analyze':
+            await update.message.reply_text("🔄 Режим анализа отменён.", reply_to_message_id=update.message.message_id)
+        elif was_in_mode == 'translate':
+            await update.message.reply_text("🔄 Режим перевода отменён.", reply_to_message_id=update.message.message_id)
+        else:
+            await update.message.reply_text("🔄 Контекст сброшен.", reply_to_message_id=update.message.message_id)
         return
 
     # КОМАНДА "К" или "КАРТИНКА" - генерация изображений
@@ -1285,62 +1294,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_to_message_id=update.message.message_id
                 )
                 return
-
-    # Команда "К" — генерация изображения в фоне (одношаговая)
-    if lower_text.startswith('к '):
-        # Извлекаем промт после "К "
-        prompt = text[2:].strip()
-        if not prompt:
-            await update.message.reply_text(
-                "⚠️ Укажите описание после *К*\n\nПример: `К красивый закат на море`",
-                parse_mode='Markdown'
-            )
-            return
-        
-        model_key = user_image_models.get(user_id, 'pro')
-        model_icon = "💎" if model_key == 'pro' else "⚡"
-        
-        # Уведомляем о начале генерации
-        status_msg = await update.message.reply_text(
-            f"🎨 Начинаю генерацию...\n{model_icon} Модель: *{model_key.upper()}*\n\n⏳ Вы можете продолжать диалог!",
-            parse_mode='Markdown',
-            reply_to_message_id=update.message.message_id
-        )
-        
-        # Запускаем генерацию в фоне
-        async def background_image_generation():
-            try:
-                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-                image_data, used_model_key = await generate_image(prompt, user_id)
-                
-                used_icon = "💎" if used_model_key == 'pro' else "⚡"
-                await update.message.reply_photo(
-                    photo=image_data,
-                    caption=f"{used_icon} Сгенерировано: *{prompt[:50]}{'...' if len(prompt) > 50 else ''}*",
-                    parse_mode='Markdown',
-                    reply_to_message_id=update.message.message_id
-                )
-                
-                # Логируем активность
-                log_activity(user_id, update.effective_user.username, "img_gen", prompt[:30])
-                await status_msg.delete()
-                
-            except Exception as e:
-                log_error("IMAGE_GEN", str(e), user_id)
-                try:
-                    await status_msg.edit_text(
-                        f"⚠️ Ошибка генерации:\n`{str(e)[:150]}`",
-                        parse_mode='Markdown'
-                    )
-                except:
-                    await update.message.reply_text(
-                        f"⚠️ Ошибка генерации:\n`{str(e)[:150]}`",
-                        parse_mode='Markdown'
-                    )
-        
-        # Запускаем как фоновую задачу
-        asyncio.create_task(background_image_generation())
-        return
 
     # Подсчет сообщений
     bot_stats['messages_count'] += 1
