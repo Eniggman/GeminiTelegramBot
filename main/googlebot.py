@@ -1298,8 +1298,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Подсчет сообщений
     bot_stats['messages_count'] += 1
     
-    # Получаем или создаём сессию
-    chat = get_or_create_session(user_id)
+    # ВАЖНО: Проверяем режимы ДО get_or_create_session (иначе таймаут сбросит user_modes)
     
     # Если включен режим генерации изображений
     if user_modes.get(user_id) == 'image_gen':
@@ -1361,6 +1360,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_error("TRANSLATE", str(e), user_id)
             await update.message.reply_text(f"⚠️ Ошибка перевода: {str(e)[:100]}")
             return
+
+    # Получаем или создаём сессию (только для обычного текстового чата)
+    chat = get_or_create_session(user_id)
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     thinking_msg = await update.message.reply_text("🤔 Думаю...", reply_to_message_id=update.message.message_id)
