@@ -913,30 +913,37 @@ async def all_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """🤖 *Справка*
 
-*Команды чата:*
+*📋 Команды:*
 /start - Сбросить контекст
-/status - Статус
-/1model - Gemini Pro
-/2model - Gemini Flash
+/status - Статус бота
+/1model - 💎 Gemini Pro
+/2model - ⚡ Gemini Flash
 /models - Список моделей
 
 *🖼️ Изображения:*
-/imagepro - 🖼️ 💎 Pro (nano banana pro)
-/imageflash - 🖼️⚡ Flash (nano banana flash)
-*Отправьте просто текст в чат:*
-🖼️Отправьте букву *К* — для генерации новой картинки
-🖼️Отправьте картинку + сподписью *Р* или *Редактировать* — Генерация новой картинки с вашим описанием
-📷 + *С* или *Смотри* — описание изображения
-📷 → Reply: *С* или *Смотри* — описание изображения
+/imagepro - 💎 Pro модель
+/imageflash - ⚡ Flash модель
+• *К* `<описание>` — генерация картинки
+• Фото + *Р* `<инструкция>` — редактирование
 
+*📷 Мультимодальность:*
+• Фото без подписи → описание
+• Фото + вопрос → ответ
+• *Пр* + фото → OCR + перевод
 
-*Быстрые:*
-*П* — Gemini Pro | *Ф* — Gemini Flash | *.* — сброс контекста
-*Пр* или *Перевод* — режим переводчика
+*📄 Документы:*
+PDF, TXT, CSV, JSON → суммаризация или ответ
 
-*Голос:* отправьте голосовое → Бот ответит текстом
+*🌐 Интернет:*
+Автопоиск Google и анализ ссылок
 
-*Админ:* /add ID /del ID
+*⚡ Быстрые:*
+*П* — Pro | *Ф* — Flash | *.* — сброс
+*Пр* — режим переводчика
+
+*🎙️ Голос:* голосовое → текст
+
+*👤 Админ:* /add ID /del ID
 """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
