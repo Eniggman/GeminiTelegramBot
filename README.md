@@ -4,7 +4,7 @@
 ![Gemini](https://img.shields.io/badge/Google%20AI-Gemini-8E75B2?style=for-the-badge&logo=google&logoColor=white)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)
 
-Умный и функциональный Telegram бот, написанный на Python с использованием Antigravity IDE (Google_).  
+Умный и функциональный Telegram бот, написанный на Python с использованием Antigravity IDE (Google).  
 Поддерживает мультимодальное общение (текст, фото, аудио), генерацию изображений и поиск в интернете.
 
 ---
