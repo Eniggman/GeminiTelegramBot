@@ -7,7 +7,8 @@ import io
 import re
 from datetime import datetime, timezone, timedelta
 import google.generativeai as genai
-from google import genai as genai_image
+from google import genai as genai_client
+from google.genai import types as genai_types
 from PIL import Image
 from telegram import Update
 from telegram.constants import ChatType
@@ -30,24 +31,39 @@ if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
 MEMORY_TIMEOUT = 10 * 60  # 10 минут
 MAX_RETRIES = 2
 
-# Системная инструкция для краткости и скорости
-SYSTEM_INSTRUCTION = """Ты — интеллектуальный помощник с фокусом на глубину и качество мысли.
-Главный принцип: МАКСИМУМ СМЫСЛА В МИНИМУМЕ СЛОВ.
+# Системная инструкция для Flash — краткость и скорость
+SYSTEM_INSTRUCTION_FLASH = """Ты — быстрый помощник. МАКСИМУМ СМЫСЛА В МИНИМУМЕ СЛОВ.
 
-1. Избегай "воды": клише, пустых вступлений ("Хороший вопрос..."), повторов и очевидных вещей.
-2. Если тема позволяет — рассуждай глубоко, философски и нестандартно.
-3. Не упрощай сложные темы, но объясняй их ясным и коротким языком.
-4. Для простых вопросов ("как дела?", "переведи") — отвечай предельно кратко.
+• Отвечай предельно кратко и по делу
+• Избегай "воды", клише, вступлений
+• Для простых вопросов — 1-2 предложения
+• Код — без лишних объяснений
+"""
+
+# Системная инструкция для Pro — глубина и анализ
+SYSTEM_INSTRUCTION_PRO = """Ты — интеллектуальный помощник с фокусом на глубину мысли.
+
+1. Рассуждай глубоко, философски, нестандартно когда тема позволяет
+2. Не упрощай сложные темы, но объясняй ясно
+3. Приводи примеры, аналогии, контраргументы
+4. Для технических вопросов — подробный анализ с альтернативами
+5. Избегай клише и воды, но не в ущерб полноте ответа
 """
 
 # Файл с доступами
 USERS_FILE = 'allowed_users.json'
 
-# Настройка Gemini (текстовый чат)
+# Настройка Gemini (старый SDK для совместимости)
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Клиент для генерации изображений (google-genai SDK)
-image_client = genai_image.Client(api_key=GEMINI_API_KEY)
+# Клиент нового SDK (для чатов с google_search и генерации изображений)
+gemini_client = genai_client.Client(api_key=GEMINI_API_KEY)
+
+# Инструменты для интернет-поиска и анализа URL
+SEARCH_TOOLS = [
+    {"google_search": {}},
+    {"url_context": {}}
+]
 
 # Модели для генерации изображений (Nano Banana)
 IMAGE_MODELS = {
@@ -212,21 +228,35 @@ def get_model_key(user_id):
     return user_models.get(user_id, 'flash')
 
 def get_model_instance(model_key):
+    # Старый SDK — для совместимости с анализом изображений
+    instruction = SYSTEM_INSTRUCTION_PRO if model_key == 'pro' else SYSTEM_INSTRUCTION_FLASH
     return genai.GenerativeModel(
         model_name=MODELS[model_key],
-        system_instruction=SYSTEM_INSTRUCTION
+        system_instruction=instruction
     )
 
 # --- ФУНКЦИЯ СБРОСА КОНТЕКСТА ---
 def reset_session(user_id):
+    """Создаёт новую сессию чата с google_search и url_context"""
     model_key = get_model_key(user_id)
-    model = get_model_instance(model_key)
-    chat_sessions[user_id] = model.start_chat(history=[])
+    instruction = SYSTEM_INSTRUCTION_PRO if model_key == 'pro' else SYSTEM_INSTRUCTION_FLASH
+    
+    # Создаём чат через новый SDK с инструментами поиска
+    chat = gemini_client.chats.create(
+        model=MODELS[model_key],
+        config=genai_types.GenerateContentConfig(
+            system_instruction=instruction,
+            tools=SEARCH_TOOLS
+        )
+    )
+    
+    chat_sessions[user_id] = chat
     last_activity[user_id] = time.time()
+    
     # Сбрасываем режим перевода при сбросе сессии
     if user_id in user_modes:
         del user_modes[user_id]
-    return chat_sessions[user_id]
+    return chat
 
 def get_or_create_session(user_id):
     """Получает сессию или создаёт новую если нужно"""
@@ -333,13 +363,13 @@ async def send_safe_message(update: Update, text: str):
                 log_error("SEND", str(e2))
 
 async def send_with_retry(chat, text: str, retries: int = MAX_RETRIES):
-    """Отправляет в Gemini с повторными попытками"""
+    """Отправляет в Gemini с повторными попытками (новый SDK)"""
     last_error = None
     for attempt in range(retries + 1):
         try:
             response = await asyncio.wait_for(
                 asyncio.to_thread(chat.send_message, text),
-                timeout=60.0
+                timeout=90.0  # Увеличен таймаут для поиска
             )
             return response
         except asyncio.TimeoutError:
@@ -373,7 +403,7 @@ async def generate_image(prompt: str, user_id: int) -> tuple[bytes, str]:
         # Генерация изображения - по документации просто contents
         response = await asyncio.wait_for(
             asyncio.to_thread(
-                lambda: image_client.models.generate_content(
+                lambda: gemini_client.models.generate_content(
                     model=model_name,
                     contents=prompt
                 )
@@ -408,7 +438,7 @@ async def edit_image(image_bytes: bytes, prompt: str, user_id: int) -> bytes:
         # Редактирование - передаём prompt и изображение
         response = await asyncio.wait_for(
             asyncio.to_thread(
-                lambda: image_client.models.generate_content(
+                lambda: gemini_client.models.generate_content(
                     model=model_name,
                     contents=[prompt, input_image]
                 )
@@ -968,7 +998,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- ОБРАБОТЧИК ФОТО (РЕДАКТИРОВАНИЕ) ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает фото с подписью 'С'/'Смотри' для анализа или 'Р' для редактирования"""
+    """
+    Обрабатывает любое фото:
+    - Режим 'translate' → OCR + перевод текста с изображения
+    - Фото + подпись → ответ на вопрос с учётом изображения
+    - Фото без подписи → описание изображения
+    - Подпись 'Р'/'Редактировать' → редактирование изображения
+    """
     user_id = update.effective_user.id
     if not check_access(user_id):
         return await update.message.reply_text("⛔️ Нет доступа.")
@@ -976,52 +1012,93 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
     caption_lower = caption.strip().lower()
     
-    # Проверяем режим ожидания фото для анализа
-    current_mode = user_modes.get(user_id)
-    is_analyze_mode = current_mode == 'image_analyze'
-    
-    # Если в режиме анализа ИЛИ подпись начинается с "С"/"Смотри"
-    if is_analyze_mode or caption_lower.startswith('смотри') or caption_lower.startswith('с ') or caption_lower == 'с':
-        # Извлекаем промт
-        if caption_lower.startswith('смотри'):
-            prompt = caption.strip()[6:].strip()  # после "смотри"
-        else:
-            prompt = caption.strip()[1:].strip()  # после "с"
-        
-        if not prompt:
-            prompt = "Опиши подробно что на этом изображении"
-        
-        thinking_msg = await update.message.reply_text("🔍 Анализирую изображение...", reply_to_message_id=update.message.message_id)
+    # Проверяем режим перевода → OCR + перевод
+    if user_modes.get(user_id) == 'translate':
+        thinking_msg = await update.message.reply_text("🔍 Распознаю и перевожу текст...", reply_to_message_id=update.message.message_id)
         
         try:
-            # Получаем фото (берём самое большое разрешение)
+            # Получаем фото
             photo = update.message.photo[-1]
             photo_file = await photo.get_file()
             photo_bytes = await photo_file.download_as_bytearray()
             
-            # Используем Flash-модель для анализа
-            flash_model = get_model_instance('flash')
+            # Промт для OCR + перевода
+            prompt = "Найди весь текст на изображении и переведи его на русский язык. Выдай только перевод, без комментариев."
+            
+            # Используем Flash для перевода (быстрее)
+            model = get_model_instance('flash')
             response = await asyncio.wait_for(
                 asyncio.to_thread(
-                    flash_model.generate_content,
+                    model.generate_content,
                     [{"mime_type": "image/jpeg", "data": bytes(photo_bytes)}, prompt]
                 ),
                 timeout=60.0
             )
             
             await thinking_msg.delete()
+            response_text = response.text if response and response.text else "⚠️ Не удалось распознать текст"
+            await send_safe_message(update, response_text)
             
-            # Проверка на пустой ответ
+            # Одноразовый режим — выключаем
+            del user_modes[user_id]
+            log_activity(user_id, update.effective_user.username, "img_translate", "OCR+translate")
+            return
+            
+        except asyncio.TimeoutError:
+            try: await thinking_msg.delete()
+            except: pass
+            log_error("IMAGE_TRANSLATE_TIMEOUT", "Таймаут", user_id)
+            await update.message.reply_text("⚠️ Превышено время обработки.", reply_to_message_id=update.message.message_id)
+            if user_id in user_modes: del user_modes[user_id]
+            return
+            
+        except Exception as e:
+            try: await thinking_msg.delete()
+            except: pass
+            log_error("IMAGE_TRANSLATE", str(e), user_id)
+            await update.message.reply_text(f"⚠️ Ошибка: `{str(e)[:150]}`", parse_mode='Markdown', reply_to_message_id=update.message.message_id)
+            if user_id in user_modes: del user_modes[user_id]
+            return
+    
+    # Проверяем команду редактирования (Р/Редактировать)
+    is_edit_short = caption_lower.startswith('р ') or caption_lower == 'р'
+    is_edit_long = caption_lower.startswith('редактировать ') or caption_lower == 'редактировать'
+    
+    if is_edit_short or is_edit_long:
+        # Логика редактирования остаётся ниже
+        pass
+    else:
+        # Обычный анализ изображения с текущей моделью пользователя
+        model_key = get_model_key(user_id)
+        model = get_model_instance(model_key)
+        model_icon = "💎" if model_key == 'pro' else "⚡"
+        
+        # Определяем промт
+        if caption:
+            prompt = caption  # Пользователь задал вопрос
+        else:
+            prompt = "Опиши подробно что на этом изображении"
+        
+        thinking_msg = await update.message.reply_text(f"{model_icon} Анализирую...", reply_to_message_id=update.message.message_id)
+        
+        try:
+            photo = update.message.photo[-1]
+            photo_file = await photo.get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
+            
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    model.generate_content,
+                    [{"mime_type": "image/jpeg", "data": bytes(photo_bytes)}, prompt]
+                ),
+                timeout=60.0
+            )
+            
+            await thinking_msg.delete()
             response_text = response.text if response and response.text else "⚠️ Не удалось проанализировать изображение"
             await send_safe_message(update, response_text)
             bot_stats['messages_count'] += 1
-            
-            # Логируем активность
-            log_activity(user_id, update.effective_user.username, "img_analyze", prompt[:30])
-            
-            # Сбрасываем режим ожидания
-            if user_id in user_modes and user_modes[user_id] == 'image_analyze':
-                del user_modes[user_id]
+            log_activity(user_id, update.effective_user.username, "img_analyze", f"{model_key}: {prompt[:20]}")
             return
             
         except asyncio.TimeoutError:
@@ -1035,19 +1112,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try: await thinking_msg.delete()
             except: pass
             log_error("IMAGE_ANALYZE", str(e), user_id)
-            await update.message.reply_text(
-                f"⚠️ Ошибка анализа:\n`{str(e)[:150]}`",
-                parse_mode='Markdown',
-                reply_to_message_id=update.message.message_id
-            )
+            await update.message.reply_text(f"⚠️ Ошибка анализа:\n`{str(e)[:150]}`", parse_mode='Markdown', reply_to_message_id=update.message.message_id)
             return
-    
-    # КОМАНДА "Р" или "РЕДАКТИРОВАТЬ" - редактирование изображения
-    is_edit_short = caption_lower.startswith('р ') or caption_lower == 'р'
-    is_edit_long = caption_lower.startswith('редактировать ') or caption_lower == 'редактировать'
 
-    if not (is_edit_short or is_edit_long):
-        return  # Не редактирование, игнорируем
     
     # Извлекаем промт
     if is_edit_long:
@@ -1092,6 +1159,95 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_error("IMAGE_EDIT", str(e), user_id)
         await update.message.reply_text(
             f"⚠️ Ошибка редактирования:\n`{str(e)[:200]}`",
+            parse_mode='Markdown',
+            reply_to_message_id=update.message.message_id
+        )
+
+# --- ОБРАБОТЧИК ДОКУМЕНТОВ (PDF, TXT, CSV и др.) ---
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обрабатывает документы:
+    - Файл без подписи → суммаризация
+    - Файл + вопрос → ответ по содержимому
+    """
+    user_id = update.effective_user.id
+    if not check_access(user_id):
+        return await update.message.reply_text("⛔️ Нет доступа.")
+    
+    document = update.message.document
+    if not document:
+        return
+    
+    # Получаем модель пользователя
+    model_key = get_model_key(user_id)
+    model_icon = "💎" if model_key == 'pro' else "⚡"
+    
+    # Проверяем MIME тип
+    mime_type = document.mime_type or "application/octet-stream"
+    supported_mimes = [
+        'application/pdf',
+        'text/plain',
+        'text/csv',
+        'text/html',
+        'text/markdown',
+        'application/json',
+    ]
+    
+    # Проверяем поддержку формата
+    is_supported = mime_type in supported_mimes or mime_type.startswith('text/')
+    if not is_supported:
+        return await update.message.reply_text(
+            f"⚠️ Формат `{mime_type}` не поддерживается.\nПоддерживаемые: PDF, TXT, CSV, JSON, HTML, Markdown",
+            parse_mode='Markdown'
+        )
+    
+    # Подпись или дефолтный промт
+    caption = update.message.caption or ""
+    prompt = caption if caption else "Суммаризируй содержимое этого документа. Выдели ключевые моменты."
+    
+    thinking_msg = await update.message.reply_text(
+        f"{model_icon} Анализирую документ...",
+        reply_to_message_id=update.message.message_id
+    )
+    
+    try:
+        # Скачиваем файл
+        file = await document.get_file()
+        file_bytes = await file.download_as_bytearray()
+        
+        # Отправляем в Gemini через новый SDK
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: gemini_client.models.generate_content(
+                    model=MODELS[model_key],
+                    contents=[
+                        genai_types.Part.from_bytes(data=bytes(file_bytes), mime_type=mime_type),
+                        prompt
+                    ]
+                )
+            ),
+            timeout=120.0  # Больше времени для документов
+        )
+        
+        await thinking_msg.delete()
+        response_text = response.text if response and response.text else "⚠️ Не удалось проанализировать документ"
+        await send_safe_message(update, response_text)
+        
+        # Логируем
+        log_activity(user_id, update.effective_user.username, "doc_analyze", f"{document.file_name[:20]}")
+        
+    except asyncio.TimeoutError:
+        try: await thinking_msg.delete()
+        except: pass
+        log_error("DOC_ANALYZE_TIMEOUT", "Таймаут", user_id)
+        await update.message.reply_text("⚠️ Превышено время анализа документа.", reply_to_message_id=update.message.message_id)
+        
+    except Exception as e:
+        try: await thinking_msg.delete()
+        except: pass
+        log_error("DOC_ANALYZE", str(e), user_id)
+        await update.message.reply_text(
+            f"⚠️ Ошибка анализа:\n`{str(e)[:150]}`",
             parse_mode='Markdown',
             reply_to_message_id=update.message.message_id
         )
@@ -1168,8 +1324,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_session(user_id)
         if was_in_mode == 'image_gen':
             await update.message.reply_text("🔄 Режим генерации отменён.", reply_to_message_id=update.message.message_id)
-        elif was_in_mode == 'image_analyze':
-            await update.message.reply_text("🔄 Режим анализа отменён.", reply_to_message_id=update.message.message_id)
         elif was_in_mode == 'translate':
             await update.message.reply_text("🔄 Режим перевода отменён.", reply_to_message_id=update.message.message_id)
         else:
@@ -1188,14 +1342,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # КОМАНДА "С" или "СМОТРИ" - режим ожидания фото для анализа
-    if lower_text in ['с', 'смотри']:
-        user_modes[user_id] = 'image_analyze'
-        await update.message.reply_text(
-            "🔍 Отправьте фото для анализа:",
-            reply_to_message_id=update.message.message_id
-        )
-        return
     
     # С промтом сразу после команды
     if lower_text.startswith('к ') or lower_text.startswith('картинка '):
@@ -1239,61 +1385,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # КОМАНДА "СМОТРИ" или "С" - анализ изображения (reply на фото)
+    # Реплай на фото — анализ изображения с вопросом
     if update.message.reply_to_message and update.message.reply_to_message.photo:
-        if lower_text.startswith('смотри') or lower_text.startswith('с ') or lower_text == 'с':
-            # Извлекаем промт
-            if lower_text.startswith('смотри'):
-                prompt = text.strip()[6:].strip()  # после "смотри"
-            else:
-                prompt = text.strip()[1:].strip()  # после "с"
+        prompt = text.strip() if text.strip() else "Опиши подробно что на этом изображении"
+        
+        model_key = get_model_key(user_id)
+        model = get_model_instance(model_key)
+        model_icon = "💎" if model_key == 'pro' else "⚡"
+        
+        thinking_msg = await update.message.reply_text(f"{model_icon} Анализирую...", reply_to_message_id=update.message.message_id)
+        
+        try:
+            photo = update.message.reply_to_message.photo[-1]
+            photo_file = await photo.get_file()
+            photo_bytes = await photo_file.download_as_bytearray()
             
-            if not prompt:
-                prompt = "Опиши подробно что на этом изображении"
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    model.generate_content,
+                    [{"mime_type": "image/jpeg", "data": bytes(photo_bytes)}, prompt]
+                ),
+                timeout=60.0
+            )
             
-            thinking_msg = await update.message.reply_text("🔍 Анализирую изображение...", reply_to_message_id=update.message.message_id)
+            await thinking_msg.delete()
+            response_text = response.text if response and response.text else "⚠️ Не удалось проанализировать"
+            await send_safe_message(update, response_text)
+            bot_stats['messages_count'] += 1
+            log_activity(user_id, update.effective_user.username, "img_analyze", f"reply: {prompt[:20]}")
+            return
             
-            try:
-                # Получаем фото из replied сообщения
-                photo = update.message.reply_to_message.photo[-1]
-                photo_file = await photo.get_file()
-                photo_bytes = await photo_file.download_as_bytearray()
-                
-                # Используем Flash-модель для анализа
-                flash_model = get_model_instance('flash')
-                response = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        flash_model.generate_content,
-                        [{"mime_type": "image/jpeg", "data": bytes(photo_bytes)}, prompt]
-                    ),
-                    timeout=60.0
-                )
-                
-                await thinking_msg.delete()
-                
-                # Проверка на пустой ответ
-                response_text = response.text if response and response.text else "⚠️ Не удалось проанализировать изображение"
-                await send_safe_message(update, response_text)
-                bot_stats['messages_count'] += 1
-                return
-                
-            except asyncio.TimeoutError:
-                try: await thinking_msg.delete()
-                except: pass
-                log_error("IMAGE_ANALYZE_TIMEOUT", "Таймаут", user_id)
-                await update.message.reply_text("⚠️ Превышено время анализа.", reply_to_message_id=update.message.message_id)
-                return
-                
-            except Exception as e:
-                try: await thinking_msg.delete()
-                except: pass
-                log_error("IMAGE_ANALYZE", str(e), user_id)
-                await update.message.reply_text(
-                    f"⚠️ Ошибка анализа:\n`{str(e)[:150]}`",
-                    parse_mode='Markdown',
-                    reply_to_message_id=update.message.message_id
-                )
-                return
+        except asyncio.TimeoutError:
+            try: await thinking_msg.delete()
+            except: pass
+            log_error("IMAGE_ANALYZE_TIMEOUT", "Таймаут", user_id)
+            await update.message.reply_text("⚠️ Превышено время анализа.", reply_to_message_id=update.message.message_id)
+            return
+            
+        except Exception as e:
+            try: await thinking_msg.delete()
+            except: pass
+            log_error("IMAGE_ANALYZE", str(e), user_id)
+            await update.message.reply_text(f"⚠️ Ошибка: `{str(e)[:150]}`", parse_mode='Markdown', reply_to_message_id=update.message.message_id)
+            return
 
     # Подсчет сообщений
     bot_stats['messages_count'] += 1
@@ -1434,6 +1568,7 @@ if __name__ == '__main__':
     # Обработчики сообщений
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))  # Обработчик фото
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))  # Обработчик документов
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
     async def post_init(app):

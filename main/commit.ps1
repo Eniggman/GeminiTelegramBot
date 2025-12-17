@@ -21,8 +21,8 @@ $foundSecrets = $false
 foreach ($file in $stagedFiles) {
     if ($file -and (Test-Path $file)) {
         foreach ($pattern in $dangerousPatterns) {
-            $matches = Select-String -Path $file -Pattern $pattern -SimpleMatch
-            if ($matches) {
+            $foundMatches = Select-String -Path $file -Pattern $pattern -SimpleMatch
+            if ($foundMatches) {
                 Write-Host "⚠️  ВНИМАНИЕ: Найден '$pattern' в файле $file" -ForegroundColor Red
                 $foundSecrets = $true
             }
@@ -38,7 +38,8 @@ if ($foundSecrets) {
         Write-Host "Отменено." -ForegroundColor Gray
         exit
     }
-} else {
+}
+else {
     Write-Host "✅ Секреты не найдены" -ForegroundColor Green
 }
 
@@ -78,7 +79,8 @@ if ($confirm -eq "y") {
     
     Write-Host ""
     Write-Host "✅ Готово!" -ForegroundColor Green
-} else {
+}
+else {
     # Откатываем git add
     git reset HEAD
     Write-Host "❌ Отменено." -ForegroundColor Gray
