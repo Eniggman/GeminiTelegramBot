@@ -4,8 +4,9 @@
 ![Gemini](https://img.shields.io/badge/Google%20AI-Gemini-8E75B2?style=for-the-badge&logo=google&logoColor=white)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)
 
-Функциональный Telegram бот, написанный на Python с использованием Antigravity IDE (Google).  
+Telegram бот для общения с Gemini, написанный на Python с использованием Antigravity IDE (Google).  
 Поддерживает мультимодальное общение (текст, фото, аудио), генерацию изображений и поиск в интернете.
+От вас требуется API Gemini, и сервер на котором он будет работать 
 
 ---
 
@@ -67,4 +68,4 @@
 *   `main/commit.ps1` — Скрипт для git коммитов.
 *   `COMMANDS.txt` — Краткий список команд.
 
-> *⚠️ Проект находится в разработке. Используйте with caution.*
+> *⚠️ Проект находится в постоянной разработке
