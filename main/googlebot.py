@@ -10,13 +10,14 @@ import google.generativeai as genai
 from google import genai as genai_client
 from google.genai import types as genai_types
 from PIL import Image
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatType
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
-load_dotenv()
+env_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(dotenv_path=env_path)
 
 # --- КОНФИГУРАЦИЯ ---
 
@@ -105,8 +106,24 @@ def get_latest_models():
         logger.error(f"Ошибка при проверке моделей: {e}")
         raise  # Пробрасываем исключение дальше, чтобы бот не запустился с неправильными моделями
 
-MODELS = get_latest_models()
-print(f"✅ Модели: Pro={MODELS['pro']}, Flash={MODELS['flash']}")
+
+# Будет инициализировано в main()
+MODELS = {}
+
+def initialize_models():
+    """Инициализирует глобальную переменную MODELS"""
+    global MODELS
+    try:
+        MODELS.update(get_latest_models())
+        print(f"✅ Модели: Pro={MODELS['pro']}, Flash={MODELS['flash']}")
+    except Exception as e:
+        logger.error(f"Critical Error: {e}")
+        # Fallback values if offline to allow bot to start (but generation might fail)
+        MODELS.update({
+            'pro': 'gemini-3-pro-preview',
+            'flash': 'gemini-flash-latest'
+        })
+        print(f"⚠️ Работаем с дефолтными моделями (Offline mode): {MODELS}")
 
 # --- ПАМЯТЬ БОТА ---
 chat_sessions = {}
@@ -115,6 +132,7 @@ user_models = {}
 allowed_users = set()
 user_image_models = {}  # Модель для генерации изображений
 user_modes = {}  # Режимы работы (chat, translate)
+photo_tasks = {}  # Временное хранение фото для кнопок {user_id: {'photo_bytes': b'', 'message_id': int, 'timestamp': float}}
 
 # --- СТАТИСТИКА И ЛОГИ ---
 bot_stats = {
@@ -284,8 +302,8 @@ def clean_markdown(text: str) -> str:
     for i in range(0, len(parts), 2):
         fragment = parts[i]
         
-        # 2. Убираем звёздочки (Telegram Legacy показывает их как текст)
-        fragment = re.sub(r'\*\*(.*?)\*\*', r'\1', fragment)  # **text** -> text
+        # 2. Жирный шрифт: **text** -> *text* (Legacy Markdown)
+        fragment = re.sub(r'\*\*(.*?)\*\*', r'*\1*', fragment)  # **text** -> *text*
         fragment = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'\1', fragment)  # *text* -> text
         
         # 3. Списки: * item -> • item
@@ -426,25 +444,26 @@ async def generate_image(prompt: str, user_id: int) -> tuple[bytes, str]:
 async def edit_image(image_bytes: bytes, prompt: str, user_id: int) -> bytes:
     """
     Редактирует изображение по промту.
+    ВСЕГДА использует gemini-3-pro-image-preview (IMAGE_MODELS['pro'])
     Источник: https://ai.google.dev/gemini-api/docs/image-generation
     """
-    model_key = user_image_models.get(user_id, 'pro')
-    model_name = IMAGE_MODELS[model_key]
+    # ВСЕГДА используем Pro модель для редактирования, игнорируя user_image_models
+    model_name = IMAGE_MODELS['pro']  # gemini-3-pro-image-preview
     
     try:
         # Открываем изображение через PIL для передачи в API
-        input_image = Image.open(io.BytesIO(image_bytes))
-        
-        # Редактирование - передаём prompt и изображение
-        response = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: gemini_client.models.generate_content(
-                    model=model_name,
-                    contents=[prompt, input_image]
-                )
-            ),
-            timeout=120.0
-        )
+        # Используем контекстный менеджер (with) для правильного закрытия файла
+        with Image.open(io.BytesIO(image_bytes)) as input_image:
+            # Редактирование - передаём prompt и изображение
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: gemini_client.models.generate_content(
+                        model=model_name,
+                        contents=[prompt, input_image]
+                    )
+                ),
+                timeout=120.0
+            )
         
         # Ищем изображение в ответе (по документации: response.parts)
         for part in response.parts:
@@ -1074,55 +1093,40 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_edit_short or is_edit_long:
         # Логика редактирования остаётся ниже
         pass
-    else:
-        # Обычный анализ изображения с текущей моделью пользователя
-        model_key = get_model_key(user_id)
-        model = get_model_instance(model_key)
-        model_icon = "💎" if model_key == 'pro' else "⚡"
-        
-        # Определяем промт
-        if caption:
-            prompt = caption  # Пользователь задал вопрос
-        else:
-            prompt = "Опиши подробно что на этом изображении"
-        
-        thinking_msg = await update.message.reply_text(f"{model_icon} Анализирую...", reply_to_message_id=update.message.message_id)
-        
+
+    # Если фото без подписи и не в режиме перевода — предлагаем выбор (кнопки)
+    if not (is_edit_short or is_edit_long):
         try:
             photo = update.message.photo[-1]
             photo_file = await photo.get_file()
             photo_bytes = await photo_file.download_as_bytearray()
             
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    model.generate_content,
-                    [{"mime_type": "image/jpeg", "data": bytes(photo_bytes)}, prompt]
-                ),
-                timeout=60.0
+            # Сохраняем во временное хранилище с timestamp для автоматической очистки
+            photo_tasks[user_id] = {
+                'photo_bytes': bytes(photo_bytes),
+                'message_id': update.message.message_id,
+                'timestamp': time.time()  # Для автоматической очистки через 2 минуты
+            }
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("🔍 Анализировать", callback_data="photo_analyze"),
+                    InlineKeyboardButton("✏️ Редактировать", callback_data="photo_edit")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "Что сделать с этим фото?",
+                reply_markup=reply_markup,
+                reply_to_message_id=update.message.message_id
             )
-            
-            await thinking_msg.delete()
-            response_text = response.text if response and response.text else "⚠️ Не удалось проанализировать изображение"
-            await send_safe_message(update, response_text)
-            bot_stats['messages_count'] += 1
-            log_activity(user_id, update.effective_user.username, "img_analyze", f"{model_key}: {prompt[:20]}")
             return
-            
-        except asyncio.TimeoutError:
-            try: await thinking_msg.delete()
-            except: pass
-            log_error("IMAGE_ANALYZE_TIMEOUT", "Таймаут", user_id)
-            await update.message.reply_text("⚠️ Превышено время анализа.", reply_to_message_id=update.message.message_id)
-            return
-            
         except Exception as e:
-            try: await thinking_msg.delete()
-            except: pass
-            log_error("IMAGE_ANALYZE", str(e), user_id)
-            await update.message.reply_text(f"⚠️ Ошибка анализа:\n`{str(e)[:150]}`", parse_mode='Markdown', reply_to_message_id=update.message.message_id)
+            log_error("PHOTO_MENU", str(e), user_id)
+            await update.message.reply_text("⚠️ Ошибка при подготовке меню действий.")
             return
 
-    
     # Извлекаем промт
     if is_edit_long:
         prompt = caption.strip()[13:].strip() # "редактировать" = 13 символов
@@ -1143,16 +1147,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_file = await photo.get_file()
         photo_bytes = await photo_file.download_as_bytearray()
         
-        # Редактируем
+        # Редактируем (всегда через gemini-3-pro-image-preview)
         result_data = await edit_image(bytes(photo_bytes), prompt, user_id)
         await thinking_msg.delete()
         
-        model_key = user_image_models.get(user_id, 'pro')
-        model_icon = "💎" if model_key == 'pro' else "⚡"
-        
         await update.message.reply_photo(
             photo=result_data,
-            caption=f"{model_icon} Отредактировано через *{model_key.upper()}*",
+            caption=f"💎 Отредактировано через *gemini-3-pro-image-preview*\n\n✏️ Запрос: {prompt}",
             parse_mode='Markdown',
             reply_to_message_id=update.message.message_id
         )
@@ -1291,6 +1292,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Быстрые команды
     stripped = text.strip()
     lower_text = stripped.lower()
+    
+    # Обработка текстовых команд и режимов ДЛЯ ФОТО (кнопка Редактировать)
+    if user_modes.get(user_id) == 'awaiting_edit_prompt':
+        if user_id not in photo_tasks:
+            del user_modes[user_id]
+            return await update.message.reply_text("⚠️ Данные фото потеряны. Отправьте фото заново.")
+            
+        prompt = text
+        photo_bytes = photo_tasks[user_id]['photo_bytes']
+        orig_msg_id = photo_tasks[user_id]['message_id']
+        
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+        thinking_msg = await update.message.reply_text("🎨 Редактирую изображение...", reply_to_message_id=update.message.message_id)
+        
+        try:
+            result_data = await edit_image(photo_bytes, prompt, user_id)
+            await thinking_msg.delete()
+            
+            # Редактирование ВСЕГДА использует Pro модель
+            await update.message.reply_photo(
+                photo=result_data,
+                caption=f"💎 Отредактировано через *gemini-3-pro-image-preview*\n\n✏️ Запрос: {prompt}",
+                parse_mode='Markdown',
+                reply_to_message_id=orig_msg_id
+            )
+            
+            # Очищаем всё
+            log_activity(user_id, update.effective_user.username, "img_edit_btn_done", prompt[:30])
+            if user_id in user_modes: del user_modes[user_id]
+            if user_id in photo_tasks: del photo_tasks[user_id]
+            return
+            
+        except Exception as e:
+            try: await thinking_msg.delete()
+            except: pass
+            log_error("IMAGE_EDIT_BTN", str(e), user_id)
+            await update.message.reply_text(f"⚠️ Ошибка редактирования: {str(e)[:100]}")
+            if user_id in user_modes: del user_modes[user_id]
+            return
     
     # Сброс режима (выход)
     if lower_text in ['выход', 'exit', 'quit', 'stop']:
@@ -1549,12 +1589,87 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except: pass
 
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает нажатия на кнопки под фото"""
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    # Всегда отвечаем на callback, чтобы убрать часы ожидания на кнопке
+    await query.answer()
+
+    if not check_access(user_id):
+        return await query.edit_message_text("⛔️ Нет доступа.")
+
+    if user_id not in photo_tasks:
+        return await query.edit_message_text("⚠️ Данные фото устарели или отсутствуют. Отправьте фото заново.")
+
+    # Проверяем таймаут (2 минуты = 120 секунд)
+    photo_data = photo_tasks[user_id]
+    elapsed_time = time.time() - photo_data.get('timestamp', 0)
+    
+    if elapsed_time > 120:
+        # Данные устарели — удаляем и сообщаем
+        del photo_tasks[user_id]
+        return await query.edit_message_text("⏱ Время ожидания истекло (2 мин). Отправьте фото заново.")
+    
+    action = query.data
+    photo_bytes = photo_data['photo_bytes']
+    
+    if action == "photo_analyze":
+        await query.edit_message_text("🔍 Анализирую...")
+        
+        # Используем ОБЫЧНУЮ модель пользователя (как в старой команде "С / Смотри")
+        model_key = get_model_key(user_id)
+        model = get_model_instance(model_key)
+        model_icon = "💎" if model_key == 'pro' else "⚡"
+        
+        prompt = "Опиши подробно что на этом изображении"
+        
+        try:
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    model.generate_content,
+                    [{"mime_type": "image/jpeg", "data": bytes(photo_bytes)}, prompt]
+                ),
+                timeout=60.0
+            )
+            
+            response_text = response.text if response and response.text else "⚠️ Не удалось проанализировать изображение"
+            
+            # Отправляем ответ новым сообщением, так как edit_message_text заменяет кнопки
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"{model_icon} **Результат анализа:**\n\n{clean_markdown(response_text)}",
+                parse_mode='Markdown',
+                reply_to_message_id=photo_data['message_id']
+            )
+            
+            # Очищаем временные данные
+            if user_id in photo_tasks:
+                del photo_tasks[user_id]
+                
+            log_activity(user_id, query.from_user.username, "img_analyze_btn", f"{model_key}")
+            
+        except Exception as e:
+            log_error("BTN_ANALYZE", str(e), user_id)
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=f"⚠️ Ошибка: {str(e)[:100]}")
+
+    elif action == "photo_edit":
+        # Переводим в режим ожидания промта для редактирования
+        # Редактирование ВСЕГДА использует gemini-3-pro-image-preview (IMAGE_MODELS['pro'])
+        user_modes[user_id] = 'awaiting_edit_prompt'
+        await query.edit_message_text("✏️ Введите описание того, что нужно изменить или добавить на этом фото:\n\n💎 Используется: `gemini-3-pro-image-preview`", parse_mode='Markdown')
+        # Данные фото НЕ удаляем, они понадобятся в handle_message
+
 # --- ЗАПУСК ---
 if __name__ == '__main__':
     load_activity_log()
     logger.info(f"Загружено {len(user_activity)} записей за сегодня")
     load_users()
     logger.info(f"Загружено {len(allowed_users)} пользователей")
+    
+    # Инициализация моделей (безопасная, не роняет бот при старте без сети)
+    initialize_models()
     
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
@@ -1577,6 +1692,7 @@ if __name__ == '__main__':
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))  # Обработчик фото
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))  # Обработчик документов
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    application.add_handler(CallbackQueryHandler(button_callback))
     
     async def post_init(app):
         await app.bot.set_my_commands([
