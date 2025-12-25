@@ -14,6 +14,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatType
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from dotenv import load_dotenv
+from youtube_transcript_api import YouTubeTranscriptApi
 
 # Загрузка переменных окружения
 env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -38,17 +39,14 @@ SYSTEM_INSTRUCTION_FLASH = """Ты — быстрый помощник. МАКС
 • Отвечай предельно кратко и по делу
 • Избегай "воды", клише, вступлений
 • Для простых вопросов — 1-2 предложения
-• Код — без лишних объяснений
+• Используй интернет для поиска информации
 """
 
 # Системная инструкция для Pro — глубина и анализ
 SYSTEM_INSTRUCTION_PRO = """Ты — интеллектуальный помощник с фокусом на глубину мысли.
 
-1. Рассуждай глубоко, философски, нестандартно когда тема позволяет
-2. Не упрощай сложные темы, но объясняй ясно
-3. Приводи примеры, аналогии, контраргументы
-4. Для технических вопросов — подробный анализ с альтернативами
-5. Избегай клише и воды, но не в ущерб полноте ответа
+• Используй интернет для поиска информации
+• СТРУКТУРА: Используй заголовки (жирным), списки и абзацы. Текст должен быть "читабельным" с телефона.
 """
 
 # Файл с доступами
@@ -133,6 +131,7 @@ allowed_users = set()
 user_image_models = {}  # Модель для генерации изображений
 user_modes = {}  # Режимы работы (chat, translate)
 photo_tasks = {}  # Временное хранение фото для кнопок {user_id: {'photo_bytes': b'', 'message_id': int, 'timestamp': float}}
+user_active_images = {}  # Активные изображения в контексте {user_id: {'photo_bytes': b'', 'timestamp': float}}
 
 # --- СТАТИСТИКА И ЛОГИ ---
 bot_stats = {
@@ -274,6 +273,11 @@ def reset_session(user_id):
     # Сбрасываем режим перевода при сбросе сессии
     if user_id in user_modes:
         del user_modes[user_id]
+    
+    # Сбрасываем активное изображение
+    if user_id in user_active_images:
+        del user_active_images[user_id]
+    
     return chat
 
 def get_or_create_session(user_id):
@@ -409,6 +413,7 @@ async def send_with_retry(chat, text: str, retries: int = MAX_RETRIES):
     raise last_error
 
 # --- ФУНКЦИИ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ---
+
 async def generate_image(prompt: str, user_id: int) -> tuple[bytes, str]:
     """
     Генерирует изображение по промту через Gemini.
@@ -476,6 +481,114 @@ async def edit_image(image_bytes: bytes, prompt: str, user_id: int) -> bytes:
         
     except asyncio.TimeoutError:
         raise TimeoutError("Превышено время редактирования (120 сек)")
+
+# --- YOUTUBE SUMMARIZER ---
+
+def extract_video_id(url: str) -> str | None:
+    """
+    Извлекает video_id из YouTube ссылки
+    Источник: Стандартный паттерн для парсинга YouTube URL
+    """
+    patterns = [
+        r'(?:youtube\.com\/watch\?v=)([\w-]+)',
+        r'(?:youtu\.be\/)([\w-]+)',
+        r'(?:youtube\.com\/embed\/)([\w-]+)',
+        r'(?:youtube\.com\/shorts\/)([\w-]+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def get_transcript(video_id: str) -> str | None:
+    """
+    Получает субтитры видео
+    Источник: https://pypi.org/project/youtube-transcript-api/
+    """
+    try:
+        ytt_api = YouTubeTranscriptApi()
+        
+        # Пробуем получить субтитры на русском или английском
+        try:
+            fetched_transcript = ytt_api.fetch(video_id, languages=['ru', 'en'])
+            full_text = ' '.join([snippet['text'] for snippet in fetched_transcript.to_raw_data()])
+            logger.info(f"YouTube: Субтитры ({fetched_transcript.language_code}), {len(full_text)} символов")
+            return full_text
+        except:
+            # Если не нашли ru/en, получаем дефолтные
+            fetched_transcript = ytt_api.fetch(video_id)
+            full_text = ' '.join([snippet['text'] for snippet in fetched_transcript.to_raw_data()])
+            logger.info(f"YouTube: Субтитры ({fetched_transcript.language_code}), {len(full_text)} символов")
+            return full_text
+        
+    except Exception as e:
+        logger.error(f"YouTube: Ошибка получения субтитров: {e}")
+        return None
+
+async def create_summary(text: str) -> str:
+    """
+    Создаёт саммари через Gemini Flash модель
+    Всегда использует Flash для скорости обработки
+    """
+    # Обрезаем если слишком длинный
+    if len(text) > 30000:
+        text = text[:30000] + "..."
+        logger.warning("YouTube: Текст обрезан до 30000 символов")
+    
+    prompt = f"""Создай структурированное саммари видео на русском языке:
+
+📌 **Основная тема**: (1-2 предложения)
+
+📋 **Ключевые моменты**:
+• пункт 1
+• пункт 2
+• пункт 3
+...
+
+💡 **Главные выводы**: (2-3 предложения)
+
+Текст субтитров:
+{text}"""
+
+    try:
+        # Используем Flash модель для саммаризации
+        flash_model = genai.GenerativeModel(
+            model_name=MODELS['flash'],
+            system_instruction=SYSTEM_INSTRUCTION_FLASH
+        )
+        
+        response = await asyncio.wait_for(
+            asyncio.to_thread(flash_model.generate_content, prompt),
+            timeout=60.0
+        )
+        
+        return response.text
+        
+    except asyncio.TimeoutError:
+        return "❌ Превышено время генерации саммари (60 сек)"
+    except Exception as e:
+        logger.error(f"YouTube: Ошибка генерации саммари: {e}")
+        return f"❌ Ошибка генерации: {str(e)[:100]}"
+
+async def summarize_youtube(url: str) -> dict:
+    """
+    Главная функция - возвращает результат саммаризации
+    """
+    video_id = extract_video_id(url)
+    
+    if not video_id:
+        return {"success": False, "error": "Не удалось распознать ссылку YouTube"}
+    
+    transcript = get_transcript(video_id)
+    
+    if not transcript:
+        return {"success": False, "error": "Не удалось получить субтитры. Возможно, они недоступны для этого видео."}
+    
+    summary = await create_summary(transcript)
+    
+    return {"success": True, "summary": summary}
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -946,8 +1059,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Фото + *Р* `<инструкция>` — редактирование
 
 *📷 Мультимодальность:*
-• Фото без подписи → описание
-• Фото + вопрос → ответ
+• Фото → кнопки 🔍 Анализировать | ✏️ Редактировать
+• После анализа — 5 мин контекста для вопросов об изображении
+• Фото + подпись → мгновенный ответ
 • *Пр* + фото → OCR + перевод
 
 *📄 Документы:*
@@ -956,8 +1070,13 @@ PDF, TXT, CSV, JSON → суммаризация или ответ
 *🌐 Интернет:*
 Автопоиск Google и анализ ссылок
 
+*⏱ Сброс контекста:*
+*.* — мгновенный сброс (текст + изображение)
+/start — полный сброс сессии
+Автосброс — через 5 минут бездействия
+
 *⚡ Быстрые:*
-*П* — Pro | *Ф* — Flash | *.* — сброс
+*П* — Pro | *Ф* — Flash
 *Пр* — режим переводчика
 
 *🎙️ Голос:* голосовое → текст
@@ -981,25 +1100,47 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         voice_file = await update.message.voice.get_file()
         voice_data = await voice_file.download_as_bytearray()
         
-        # Используем Flash для голоса (быстрее)
+        # Используем Flash для распознавания речи (быстрее)
         flash_model = get_model_instance('flash')
         
-        response = await asyncio.wait_for(
+        # Шаг 1: Распознаём речь в текст
+        recognition_response = await asyncio.wait_for(
             asyncio.to_thread(
                 flash_model.generate_content,
-                ["Распознай речь и ответь:", {"mime_type": "audio/ogg", "data": bytes(voice_data)}]
+                ["Распознай речь в текст. Выведи ТОЛЬКО распознанный текст, без комментариев:", {"mime_type": "audio/ogg", "data": bytes(voice_data)}]
             ),
-            timeout=120.0
+            timeout=60.0
         )
+        
+        recognized_text = recognition_response.text if recognition_response and recognition_response.text else None
+        
+        if not recognized_text or recognized_text.strip() == "":
+            await thinking_msg.delete()
+            await update.message.reply_text("⚠️ Не удалось распознать речь")
+            log_activity(user_id, update.effective_user.username, "voice_failed", "")
+            return
+        
+        # Обновляем статус
+        await thinking_msg.edit_text(f"🎤 Распознано: _{recognized_text[:50]}..._\n🤔 Думаю...", parse_mode='Markdown')
+        
+        # Шаг 2: Отправляем распознанный текст в сессию чата пользователя
+        # Это сохранит контекст для последующих текстовых вопросов
+        chat = get_or_create_session(user_id)
+        
+        # Отправляем в чат с повторными попытками
+        response = await send_with_retry(chat, recognized_text)
         
         await thinking_msg.delete()
         
         # Проверка на пустой ответ
-        response_text = response.text if response and response.text else "⚠️ Не удалось распознать речь"
-        await send_safe_message(update, response_text)
+        response_text = response.text if response and response.text else "⚠️ Пустой ответ от API"
+        
+        # Формируем финальный ответ с показом распознанного текста
+        final_text = f"🎤 *Распознано:* {recognized_text}\n\n{response_text}"
+        await send_safe_message(update, final_text)
         
         # Логируем активность
-        log_activity(user_id, update.effective_user.username, "voice", "")
+        log_activity(user_id, update.effective_user.username, "voice", recognized_text[:30])
         
     except asyncio.TimeoutError:
         try: await thinking_msg.delete()
@@ -1341,6 +1482,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("✅ Режим переводчика выключен.", reply_to_message_id=update.message.message_id)
             elif current_mode == 'image_gen':
                 await update.message.reply_text("✅ Режим генерации изображений выключен.", reply_to_message_id=update.message.message_id)
+            elif current_mode == 'youtube_mode':
+                await update.message.reply_text("✅ Режим YouTube саммари выключен.", reply_to_message_id=update.message.message_id)
             return
 
     # Включение режима переводчика (одноразовый)
@@ -1350,6 +1493,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🗣 Отправьте текст для перевода на русский:",
             reply_to_message_id=update.message.message_id
         )
+        return
+
+    # Включение режима YouTube саммари
+    if lower_text in ['ю', 'ютуб', 'youtube']:
+        user_modes[user_id] = 'youtube_mode'
+        await update.message.reply_text(
+            "📺 Отправьте ссылку на YouTube видео:",
+            reply_to_message_id=update.message.message_id
+        )
+        log_activity(user_id, update.effective_user.username, 'youtube_request', 'Режим активирован')
         return
 
     # Переключение моделей (Про / Флэш)
@@ -1520,6 +1673,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
     
+    # Если включен режим YouTube саммари
+    if user_modes.get(user_id) == 'youtube_mode':
+        del user_modes[user_id]  # Сбрасываем режим сразу
+        
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        thinking_msg = await update.message.reply_text(
+            "⏳ Загружаю субтитры и создаю саммари...",
+            reply_to_message_id=update.message.message_id
+        )
+        
+        try:
+            result = await summarize_youtube(text)
+            
+            await thinking_msg.delete()
+            
+            if result['success']:
+                await send_safe_message(update, result['summary'])
+                log_activity(user_id, update.effective_user.username, 'youtube_summary', text)
+            else:
+                await update.message.reply_text(
+                    f"❌ {result['error']}",
+                    reply_to_message_id=update.message.message_id
+                )
+                log_activity(user_id, update.effective_user.username, 'youtube_error', result['error'])
+            return
+        except Exception as e:
+            try: await thinking_msg.delete()
+            except: pass
+            log_error("YOUTUBE", str(e), user_id)
+            await update.message.reply_text(
+                f"❌ Ошибка обработки YouTube: {str(e)[:100]}",
+                reply_to_message_id=update.message.message_id
+            )
+            return
+    
     # Если включен режим переводчика
     if user_modes.get(user_id) == 'translate':
         prompt_text = f"Переведи этот текст на русский язык максимально точно и литературно, сохраняя стиль оригинала. Не добавляй никаких комментариев, только перевод:\n\n{text}"
@@ -1542,15 +1730,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⚠️ Ошибка перевода: {str(e)[:100]}")
             return
 
-    # Получаем или создаём сессию (только для обычного текстового чата)
-    chat = get_or_create_session(user_id)
 
+    # Проверяем, есть ли активное изображение в контексте
+    active_image = user_active_images.get(user_id)
+    if active_image:
+        # Проверяем таймаут (5 минут)
+        elapsed = time.time() - active_image['timestamp']
+        if elapsed > 300:  # 5 минут
+            del user_active_images[user_id]
+            active_image = None
+    
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     thinking_msg = await update.message.reply_text("🤔 Думаю...", reply_to_message_id=update.message.message_id)
     
     try:
         clean_text = text.replace(f'@{bot_username}', '').strip() if bot_username else text
-        response = await send_with_retry(chat, clean_text)
+        
+        # Если есть активное изображение — используем мультимодальный запрос
+        if active_image:
+            model_key = get_model_key(user_id)
+            model = get_model_instance(model_key)
+            
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    model.generate_content,
+                    [{"mime_type": "image/jpeg", "data": active_image['photo_bytes']}, clean_text]
+                ),
+                timeout=60.0
+            )
+        else:
+            # Обычный текстовый чат с поиском
+            chat = get_or_create_session(user_id)
+            response = await send_with_retry(chat, clean_text)
+        
         await thinking_msg.delete()
         
         # Проверка на пустой ответ
@@ -1644,7 +1856,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_to_message_id=photo_data['message_id']
             )
             
-            # Очищаем временные данные
+            # СОХРАНЯЕМ изображение в контексте для последующих вопросов
+            user_active_images[user_id] = {
+                'photo_bytes': photo_bytes,
+                'timestamp': time.time()  # Для автоматической очистки через 5 минут
+            }
+            
+            # Очищаем временные данные кнопок
             if user_id in photo_tasks:
                 del photo_tasks[user_id]
                 
@@ -1699,10 +1917,10 @@ if __name__ == '__main__':
             ("start", "🔄 Сбросить контекст"),
             ("help", "❓ Справка"),
             ("status", "📊 Статус бота"),
-            ("imagepro", "🖼️ 💎 Pro"),
-            ("imageflash", "🖼️⚡ Flash"),
-            ("1model", "💎 Gemini Pro"),
-            ("2model", "⚡ Gemini Flash"),
+            ("imagepro", "Image💎 Pro"),
+            ("imageflash", "Image⚡ Flash"),
+            ("1model", "💎 Text Gemini Pro"),
+            ("2model", "⚡ Text Gemini Flash"),
             ("models", "📋 Список моделей"),
         ])
         logger.info("Меню команд установлено")

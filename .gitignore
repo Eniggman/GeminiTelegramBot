@@ -15,7 +15,7 @@ venv/
 .idea/
 
 # Documentation and Trash
-docs/
+# docs/ (Removed to allow agent access)
 
 # Logs and Data
 *.log
@@ -26,3 +26,4 @@ known_models.json
 # Scripts
 deploy.ps1
 main/deploy.ps1
+main/commit.ps1
