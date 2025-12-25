@@ -761,6 +761,19 @@ async def set_flash_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reset_session(user_id)
     await update.message.reply_text(f"⚡ Модель: *Gemini Flash*\n`{MODELS['flash']}`", parse_mode='Markdown')
 
+async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Включает режим YouTube саммари"""
+    user_id = update.effective_user.id
+    if not check_access(user_id):
+        return await update.message.reply_text("⛔️ Нет доступа.")
+    
+    user_modes[user_id] = 'youtube_mode'
+    await update.message.reply_text(
+        "📺 Отправьте ссылку на YouTube видео:",
+        reply_to_message_id=update.message.message_id
+    )
+    log_activity(user_id, update.effective_user.username, 'youtube_cmd', 'Режим активирован')
+
 # --- КОМАНДЫ ДЛЯ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ---
 async def set_image_pro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Переключает на Pro модель для генерации изображений"""
@@ -1901,6 +1914,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('2model', set_flash_model))
     application.add_handler(CommandHandler('models', all_models))
     application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('youtube', youtube_command))
     # Команды для изображений
     application.add_handler(CommandHandler('imagepro', set_image_pro))
     application.add_handler(CommandHandler('imageflash', set_image_flash))
@@ -1922,6 +1936,7 @@ if __name__ == '__main__':
             ("1model", "💎 Text Gemini Pro"),
             ("2model", "⚡ Text Gemini Flash"),
             ("models", "📋 Список моделей"),
+            ("youtube", "📺 YouTube Саммари"),
         ])
         logger.info("Меню команд установлено")
     
