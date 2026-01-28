@@ -1,0 +1,7 @@
+python-telegram-bot
+google-generativeai
+google-genai
+Pillow
+python-dotenv
+youtube-transcript-api
+psutil
