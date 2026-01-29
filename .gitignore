@@ -1,48 +1,29 @@
-# Python
+# Python кеш
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
 
-# Virtual Environment
-venv/
-env/
-ENV/
+# Виртуальное окружение
 .venv/
+venv/
 
-# Environment Variables
+# Секреты и переменные окружения
 .env
 
-# Logs
+# Логи и данные
 *.log
 activity_log.json
-
-# Bot data
 allowed_users.json
+known_models.json
 
-# Local scripts and tools
+# IDE и редакторы
+.idea/
+.vscode/
+*.code-workspace
+
+# Локальные скрипты
 *.ps1
 *.bat
-.agent/
-.idea/
-README_preview.html
-bot.code-workspace
 
+# Gemini agent
+.agent/

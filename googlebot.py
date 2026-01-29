@@ -9,7 +9,9 @@ import re
 import uuid
 import platform
 import psutil
+import requests
 from datetime import datetime, timezone, timedelta
+
 
 from google import genai as genai_client
 from google.genai import types as genai_types
@@ -908,6 +910,48 @@ def extract_video_id(url: str) -> str | None:
     return None
 
 
+def get_youtube_preview(url: str) -> dict:
+
+    """
+    Получает превью и название YouTube видео через oEmbed API
+    Источник: https://oembed.com/ и https://developers.google.com/youtube/oembed
+    """
+    video_id = extract_video_id(url)
+    if not video_id:
+        return {"success": False, "error": "🔗 Не удалось распознать ссылку YouTube"}
+    
+    try:
+        # oEmbed API YouTube (без API ключа)
+        oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        response = requests.get(oembed_url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Thumbnail URL (максимальное качество)
+        thumbnail_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+        
+        return {
+            "success": True,
+            "title": data.get("title", "Без названия"),
+            "thumbnail_url": thumbnail_url,
+            "original_url": url
+        }
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            return {"success": False, "error": "🔒 Видео не найдено или недоступно"}
+        elif e.response.status_code == 401:
+            return {"success": False, "error": "🔞 Видео с ограниченным доступом"}
+        else:
+            return {"success": False, "error": f"❌ Ошибка YouTube API: {e.response.status_code}"}
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "⏱️ Превышено время ожидания ответа от YouTube"}
+    except requests.exceptions.ConnectionError:
+        return {"success": False, "error": "🌐 Ошибка подключения к YouTube"}
+    except Exception as e:
+        logger.error(f"YouTube Preview: {e}")
+        return {"success": False, "error": f"❌ Ошибка: {str(e)[:100]}"}
+
+
 def get_transcript(video_id: str) -> dict:
     """
     Получает субтитры видео
@@ -916,6 +960,7 @@ def get_transcript(video_id: str) -> dict:
     """
     try:
         ytt_api = YouTubeTranscriptApi()
+
 
         # Пробуем получить субтитры на русском или английском
         try:
@@ -1323,7 +1368,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **⚡ Быстрые команды ввиде букв:**
 • **П** — Gemini Pro | **Ф** — Gemini Flash
-? **??** ? ??????? ??????/???? (???? ???????????? ? ?????????)
+• **Ю** — YouTube саммари (шли ссылку и получишь краткое содержание)
 • Автопоиск Google и анализ ссылок
 
 **🖼️ Изображения:**
@@ -1332,7 +1377,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Напишите в чат букву **К** + `<описание>` — произойдет генерация картинки
 • Напишите в чат букву **Р** (или **Редактировать**) — включится режим редактирования, затем отправьте фото
 • Напишите в чат букву **Р** + `<инструкция>` + Фото — сразу редактирование фото
-? ???????? ? ??? ????? **??** + ???? ? ??????? ?????? ?? ??????????? (???????????? ????????)
+
 
 **📷 Мультимодальность:**
 • Отправьте фото → появляются кнопки Анализировать | ✏️ Редактировать
@@ -2029,8 +2074,10 @@ async def _process_exit_commands(
     messages = {
         'translate': "✅ Режим переводчика выключен.",
         'image_gen': "✅ Режим генерации изображений выключен.",
-        'youtube_mode': "✅ Режим YouTube саммари выключен."
+        'youtube_mode': "✅ Режим YouTube саммари выключен.",
+        'youtube_preview_mode': "✅ Режим YouTube превью выключен."
     }
+
     msg = messages.get(current_mode, "✅ Режим выключен.")
     await update.message.reply_text(msg, reply_to_message_id=update.message.message_id)
     return True
@@ -2141,17 +2188,65 @@ async def _process_fast_commands(
                 )
             return True
 
+    # --- YOUTUBE ПРЕВЬЮ ---
+    # Включение режима YouTube превью (без ссылки)
+    if lower_text in ['превью', 'пре']:
+        context.user_data['mode'] = 'youtube_preview_mode'
+        await update.message.reply_text(
+            "🖼️ Отправьте ссылку на YouTube видео для превью:",
+            reply_to_message_id=update.message.message_id
+        )
+        log_activity(user_id, update.effective_user.username, 'preview_request', 'Режим активирован')
+        return True
+
+    # Мгновенное превью со ссылкой (превью <ссылка>)
+    if lower_text.startswith('превью ') or lower_text.startswith('пре '):
+        if lower_text.startswith('пре '):
+            url = stripped[4:].strip()
+        else:
+            url = stripped[7:].strip()
+
+        if url:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+            
+            result = get_youtube_preview(url)
+            
+            if result['success']:
+                # Формируем подпись: название + ссылка
+                caption = f"🎬 {result['title']}\n{result['original_url']}"
+                
+                try:
+                    await update.message.reply_photo(
+                        photo=result['thumbnail_url'],
+                        caption=caption,
+                        reply_to_message_id=update.message.message_id
+                    )
+                    log_activity(user_id, update.effective_user.username, 'youtube_preview', url)
+                except Exception as e:
+                    logger.error(f"YouTube Preview send error: {e}")
+                    await update.message.reply_text(
+                        f"❌ Ошибка отправки превью: {str(e)[:100]}",
+                        reply_to_message_id=update.message.message_id
+                    )
+            else:
+                await update.message.reply_text(
+                    result['error'],
+                    reply_to_message_id=update.message.message_id
+                )
+            return True
+
     # Переключение моделей (Про / Флэш)
     if lower_text in ['п', 'про', 'pro']:
+
         context.user_data['model'] = 'pro'
         reset_session(context)
-        await update.message.reply_text("<i>Pro</i> 💎", parse_mode='HTML', reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("💎 Pro", reply_to_message_id=update.message.message_id)
         return True
 
     if lower_text == 'ф':
         context.user_data['model'] = 'flash'
         reset_session(context)
-        await update.message.reply_text("<i>Flash</i> ⚡", parse_mode='HTML', reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("⚡ Flash", reply_to_message_id=update.message.message_id)
         return True
 
     # Сброс контекста
@@ -2433,8 +2528,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop('mode', None)
         return await _process_youtube_mode(update, context, text, user_id)
 
+    # Режим YouTube превью
+    if context.user_data.get('mode') == 'youtube_preview_mode':
+        context.user_data.pop('mode', None)
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+        
+        result = get_youtube_preview(text)
+        
+        if result['success']:
+            # Формируем подпись: название + ссылка
+            caption = f"🎬 {result['title']}\n{result['original_url']}"
+            
+            try:
+                await update.message.reply_photo(
+                    photo=result['thumbnail_url'],
+                    caption=caption,
+                    reply_to_message_id=update.message.message_id
+                )
+                log_activity(user_id, update.effective_user.username, 'youtube_preview', text)
+            except Exception as e:
+                logger.error(f"YouTube Preview send error: {e}")
+                await update.message.reply_text(
+                    f"❌ Ошибка отправки превью: {str(e)[:100]}",
+                    reply_to_message_id=update.message.message_id
+                )
+        else:
+            await update.message.reply_text(
+                result['error'],
+                reply_to_message_id=update.message.message_id
+            )
+        return
+
     # Режим переводчика
     if context.user_data.get('mode') == 'translate':
+
         return await _process_translation_mode(update, context, text, user_id)
 
     # 6. ОБЫЧНЫЙ ТЕКСТОВЫЙ ЧАТ
