@@ -19,7 +19,7 @@ from PIL import Image
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultsButton
 from telegram.constants import ChatType
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, InlineQueryHandler, filters
-from telegram.error import NetworkError
+from telegram.error import NetworkError, BadRequest
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
 
@@ -40,7 +40,7 @@ if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
 if not ADMIN_ID:
     print("ВНИМАНИЕ: ADMIN_ID не задан в .env! Админ-функции будут недоступны.")
 
-# Настройки
+# Базовые настройки
 MEMORY_TIMEOUT = 5 * 60  # 5 минут
 MAX_RETRIES = 2
 
@@ -53,7 +53,7 @@ IMAGE_CONTEXT_TIMEOUT = 300   # Время жизни изображения в 
 
 # Telegram лимиты
 MAX_MESSAGE_LENGTH = 4000     # Максимальная длина сообщения
-ALBUM_WAIT_TIME = 1.5         # Секунды ожидания остальных фото альбома (было 0.5 — слишком мало)
+ALBUM_WAIT_TIME = 1.5         # Секунды ожидания остальных фото альбома
 MAX_ALBUM_PHOTOS = 10         # Максимум фото в альбоме для обработки
 
 # Системная инструкция для Flash — краткость и скорость
@@ -74,10 +74,6 @@ SYSTEM_INSTRUCTION_PRO = """Ты — интеллектуальный помощ
 # Файл с доступами
 USERS_FILE = 'allowed_users.json'
 
-# Настройка Gemini (старый SDK для совместимости)
-# Настройка Gemini (старый SDK удален)
-# genai.configure(api_key=GEMINI_API_KEY)
-
 # Клиент нового SDK (для чатов с google_search и генерации изображений)
 gemini_client = genai_client.Client(api_key=GEMINI_API_KEY)
 
@@ -89,7 +85,7 @@ SEARCH_TOOLS = [
 
 # Модели для генераций изображений (Nano Banana)
 IMAGE_MODELS = {
-    'pro': 'gemini-3-pro-image-preview',  # Nano Banana Pro (, thinking mode)
+    'pro': 'gemini-3-pro-image-preview',  # Nano Banana Pro (thinking mode)
     'flash': 'gemini-2.5-flash-image'     # Nano Banana Flash (1024px, быстрый)
 }
 
@@ -182,7 +178,7 @@ def get_latest_models() -> dict[str, str]:
     Источник: https://ai.google.dev/gemini-api/docs/gemini-3
     """
     required_pro = 'gemini-3-pro-preview'
-    required_flash = 'gemini-3-flash-preview'  # Обновлено: gemini-flash-latest -> gemini-3-flash-preview
+    required_flash = 'gemini-3-flash-preview'  # Фиксируем версию модели
 
     try:
         # Получаем список доступных моделей
@@ -200,7 +196,7 @@ def get_latest_models() -> dict[str, str]:
 
     except Exception as e:
         logger.error(f"Ошибка при проверке моделей: {e}")
-        raise  # Пробрасываем исключение дальше, чтобы бот не запустился с неправильными моделями
+        raise  # Не даём стартовать с неправильными моделями
 
 
 # Будет инициализировано в main()
@@ -209,13 +205,12 @@ MODELS = {}
 
 def initialize_models() -> None:
     """Инициализирует глобальную переменную MODELS"""
-    # global не нужен для update словаря
     try:
         MODELS.update(get_latest_models())
         logger.debug(f"✅ Модели: Pro={MODELS['pro']}, Flash={MODELS['flash']}")
     except Exception as e:
         logger.error(f"Critical Error: {e}")
-        # Fallback values if offline to allow bot to start (but generation might fail)
+        # Фоллбек для запуска без сети (генерации могут не работать)
         MODELS.update({
             'pro': 'gemini-3-pro-preview',
             'flash': 'gemini-flash-latest'
@@ -233,7 +228,7 @@ def initialize_models() -> None:
 # - 'active_image': активное изображение в контексте {'photo_bytes': bytes, 'timestamp': float}
 
 
-allowed_users = set()  # Глобальный список разрешённых пользователей
+allowed_users = set()
 
 # Хранилище для сбора альбомов (media_group)
 # Ключ: media_group_id, значение: {'photos': [bytes], 'caption': str, 'user_id': int, 'chat_id': int, 'message_id': int, 'timestamp': float}
@@ -297,7 +292,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
             logger.debug(f"Не удалось уведомить пользователя об ошибке: {notify_err}")
 
 # --- ЛОГИРОВАНИЕ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЕЙ ---
-# Timezone для Украины (Киев)
+# Часовой пояс Киева
 KYIV_TZ = timezone(timedelta(hours=2))  # UTC+2
 
 # Файл для логов активности
@@ -398,9 +393,7 @@ def check_access(user_id: int) -> bool:
 
 def get_bot_avatar_url() -> str:
     """
-    Возвращает статический URL аватарки бота для инлайн-результатов.
-    SECURITY: Используем публичный URL на GitHub вместо api.telegram.org/file/bot{token}/...
-    чтобы не раскрывать токен бота в URL (он мог попасть в логи/кеши).
+
     """
     return BOT_AVATAR_URL
 
@@ -437,7 +430,7 @@ def reset_session(context: ContextTypes.DEFAULT_TYPE) -> object:
     return chat
 
 
-def get_or_create_session(context: ContextTypes.DEFAULT_TYPE) -> object:  # Возвращает Chat объект
+def get_or_create_session(context: ContextTypes.DEFAULT_TYPE) -> object:
     """Получает сессию или создаёт новую если нужно"""
     current_time = time.time()
     last_time = context.user_data.get('last_activity', 0)
@@ -528,8 +521,7 @@ def format_for_telegram(text: str) -> str:
     if not text:
         return ""
 
-    # 1. Обнаружение и обработка Markdown-таблиц (|---|)
-    # Оборачиваем таблицы в <pre> для моноширинного отображения
+    # 1) Таблицы Markdown: оборачиваем в <pre> для моноширинного вывода
     table_blocks = []
 
     def wrap_table(match):
@@ -576,20 +568,18 @@ def format_for_telegram(text: str) -> str:
         table_blocks.append(f"<pre>{joined_lines}</pre>")
         return placeholder
 
-    # Паттерн для таблиц: строки начинающиеся с | и содержащие |
+    # Паттерн для таблиц: строки с | в начале и конце
     table_pattern = r'(?:^\|.+\|$\n?)+'
     text = re.sub(table_pattern, wrap_table, text, flags=re.MULTILINE)
 
-    # 2. Разделяем текст на код-блоки и обычный текст
-    # Это защищает содержимое ``` блоков от дальнейшей обработки
+    # 2) Разбиваем на код-блоки, чтобы не трогать их содержимое
     parts = re.split(r'(```[\s\S]*?```|`[^`\n]+`)', text)
 
     result_parts = []
     for i, part in enumerate(parts):
-        if i % 2 == 1:  # Это код-блок или inline code
+        if i % 2 == 1:  # Код-блок или inline code
             if part.startswith('```'):
-                # Многострочный код-блок
-                # Удаляем ``` и возможный язык программирования
+                # Многострочный код-блок: снимаем ``` и язык
                 code_match = re.match(r'```(\w*)\n?([\s\S]*?)```', part)
                 if code_match:
                     lang = code_match.group(1)
@@ -603,34 +593,34 @@ def format_for_telegram(text: str) -> str:
                     result_parts.append(f'<pre>{escape_html(part[3:-3])}</pre>')
             else:
                 # Inline code
-                code = part[1:-1]  # Убираем `
+                code = part[1:-1]
                 code = escape_html(code)
                 result_parts.append(f'<code>{code}</code>')
         else:
-            # Обычный текст - применяем форматирование
+            # Обычный текст: применяем форматирование
             fragment = part
 
             # Экранируем HTML-спецсимволы
             fragment = escape_html(fragment)
 
-            # 3. Заголовки: ### Header -> <b>Header</b>
+            # 3) Заголовки: ### Header -> <b>Header</b>
             fragment = re.sub(r'^\s*#{1,6}\s+(.*?)\s*$', r'<b>\1</b>\n', fragment, flags=re.MULTILINE)
 
-            # 4. Жирный шрифт: **text** -> <b>text</b>
-            # Используем [^*]+ вместо .*? для корректной работы с кавычками
+            # 4) Жирный: **text** -> <b>text</b>
+            # Используем [^*]+ вместо.*? для корректной работы с кавычками
             fragment = re.sub(r'\*\*([^*]+(?:\*(?!\*)[^*]*)*)\*\*', r'<b>\1</b>', fragment)
 
-            # 5. Курсив: *text* или _text_ -> <i>text</i>
+            # 5) Курсив: *text* или _text_ -> <i>text</i>
             fragment = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', fragment)
             fragment = re.sub(r'(?<!_)_([^_\n]+)_(?!_)', r'<i>\1</i>', fragment)
 
-            # 6. Зачёркнутый: ~~text~~ -> <s>text</s>
+            # 6) Зачёркнутый: ~~text~~ -> <s>text</s>
             fragment = re.sub(r'~~(.*?)~~', r'<s>\1</s>', fragment)
 
-            # 7. Списки: * item или - item -> • item
+            # 7) Списки: * item или - item -> • item
             fragment = re.sub(r'^\s*[\*\-]\s+', '• ', fragment, flags=re.MULTILINE)
 
-            # 8. Ссылки: [text](url) -> <a href="url">text</a>
+            # 8) Ссылки: [text](url) -> <a href="url">text</a>
             def replace_link(match):
                 link_text = match.group(1)
                 url = match.group(2).replace('"', '&quot;')
@@ -717,8 +707,7 @@ async def send_with_retry(chat, text: str, retries: int = MAX_RETRIES):
     last_error = None
     for attempt in range(retries + 1):
         try:
-            # ПРИМЕЧАНИЕ: Использование chat.send_message обеспечивает автоматическую 
-            # передачу Thought Signatures (Подписей мыслей), что необходимо для моделей Gemini 3.
+            # Используем chat.send_message: нужны Thought Signatures для Gemini 3
             # Источник: https://ai.google.dev/gemini-api/docs/thought-signatures
             response = await asyncio.wait_for(
                 asyncio.to_thread(chat.send_message, text),
@@ -1368,7 +1357,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 **⚡ Быстрые команды ввиде букв:**
 • **П** — Gemini Pro | **Ф** — Gemini Flash
-• **Ю** — YouTube саммари (шли ссылку и получишь краткое содержание)
+• **Пр** — перевод текста/фото (или Пр/Перевод)
 • Автопоиск Google и анализ ссылок
 
 **🖼️ Изображения:**
@@ -1377,7 +1366,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Напишите в чат букву **К** + `<описание>` — произойдет генерация картинки
 • Напишите в чат букву **Р** (или **Редактировать**) — включится режим редактирования, затем отправьте фото
 • Напишите в чат букву **Р** + `<инструкция>` + Фото — сразу редактирование фото
-
+• Напишите в чат **К** + `про` / `флеш` — смена модели генерации (переключается вручную)
 
 **📷 Мультимодальность:**
 • Отправьте фото → появляются кнопки Анализировать | ✏️ Редактировать
@@ -2240,13 +2229,13 @@ async def _process_fast_commands(
 
         context.user_data['model'] = 'pro'
         reset_session(context)
-        await update.message.reply_text("💎 Pro", reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("<i>Pro</i> 💎", parse_mode='HTML', reply_to_message_id=update.message.message_id)
         return True
 
     if lower_text == 'ф':
         context.user_data['model'] = 'flash'
         reset_session(context)
-        await update.message.reply_text("⚡ Flash", reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("<i>Flash</i> ⚡", parse_mode='HTML', reply_to_message_id=update.message.message_id)
         return True
 
     # Сброс контекста
@@ -2629,6 +2618,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.debug(f"Не удалось уведомить админа: {notify_err}")
 
 
+async def safe_answer_query(query, text=None, show_alert=False, **kwargs):
+    params = dict(kwargs)
+    if text is not None:
+        params["text"] = text
+    if show_alert:
+        params["show_alert"] = True
+    try:
+        await query.answer(**params)
+    except BadRequest as e:
+        msg = str(e).lower()
+        if "query is too old" in msg or "query id is invalid" in msg or "response timeout expired" in msg:
+            logger.debug(f"Query answer skipped (expired): {e}")
+            return
+        raise
+
+
 async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обрабатывает inline-запросы (@bot_name текст).
@@ -2636,15 +2641,34 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     Источник: https://docs.python-telegram-bot.org/en/stable/examples.inlinekeyboard.html
     """
     query = update.inline_query
-    user_id = query.from_user.id
-    text = query.query.strip()
-    
+    user = query.from_user
+    text = (query.query or "").strip()
+
     # Получаем статический URL аватарки бота для thumbnail
     avatar_url = get_bot_avatar_url()
-    
+
+    async def answer_single(
+        title: str,
+        description: str,
+        message_text: str,
+        cache: int = 5
+    ) -> None:
+        results = [
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title=title,
+                description=description,
+                input_message_content=InputTextMessageContent(
+                    message_text=message_text[:4096],
+                    parse_mode='HTML'
+                ),
+                thumbnail_url=avatar_url
+            )
+        ]
+        await safe_answer_query(query, results=results, cache_time=cache)
+
     # Проверка доступа — неавторизованные получат кнопку перехода в бота
-    if not check_access(user_id):
-        
+    if not check_access(user.id):
         results = [
             InlineQueryResultArticle(
                 id="no_access",
@@ -2657,8 +2681,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         ]
         # Кнопка сверху — сразу перекидывает в бота
-        await query.answer(
-            results,
+        await safe_answer_query(
+            query,
+            results=results,
             cache_time=1,  # Временно 1 сек для отладки
             button=InlineQueryResultsButton(
                 text="【Жми на меня】",
@@ -2666,43 +2691,28 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
         )
         return
-    
+
     # Пустой запрос — показываем подсказку
     if not text:
-        results = [
-            InlineQueryResultArticle(
-                id="hint",
-                title="💡 Введите вопрос",
-                description="Закончите вопрос точкой (.) или (?)",
-                input_message_content=InputTextMessageContent(
-                    message_text="💡 Используйте: @bot_name ваш вопрос?"
-                ),
-                thumbnail_url=avatar_url
-            )
-        ]
-        await query.answer(results, cache_time=60)
+        await answer_single(
+            "💡 Введите вопрос",
+            "Закончите вопрос точкой (.) или (?)",
+            "💡 Используйте: @bot_name ваш вопрос?",
+            cache=60
+        )
         return
-    
+
     # Триггер: текст должен заканчиваться на точку или знак вопроса
     if not (text.endswith('.') or text.endswith('?')):
-        results = [
-            InlineQueryResultArticle(
-                id="waiting",
-                title="Поставьте в конце . или ?",
-                description=f"Закончите точкой (.) или вопросом (?) — \"{text[:30]}...\"",
-                input_message_content=InputTextMessageContent(
-                    message_text="Поставьте в конце . или ?"
-                ),
-                thumbnail_url=avatar_url
-            )
-        ]
-        await query.answer(results, cache_time=1)
+        await answer_single(
+            "Поставьте в конце . или ?",
+            f"Закончите точкой (.) или вопросом (?) — \"{text[:30]}...\"",
+            "Поставьте в конце . или ?",
+            cache=1
+        )
         return
-    
+
     try:
-        # Уникальный ID для результата (требование Telegram)
-        result_id = str(uuid.uuid4())
-        
         # Используем Flash модель для быстрого ответа
         response = await asyncio.wait_for(
             asyncio.to_thread(
@@ -2710,65 +2720,44 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                     model=MODELS['flash'],
                     contents=text,
                     config=genai_types.GenerateContentConfig(
-                        system_instruction="Ответ должен быть кратким и по делу. Используй интернет для поиска актуальной информации.",
+                        system_instruction="Ответ должен быть как возможно кратким. Используй интернет для поиска актуальной информации.",
                         tools=SEARCH_TOOLS
                     )
                 )
             ),
             timeout=TIMEOUT_MEDIUM  # Увеличен таймаут для поиска
         )
-        
+
         response_text = response.text if response and response.text else "Не удалось получить ответ"
-        
+
         # Форматируем ответ для Telegram HTML
         formatted_text = format_for_telegram(response_text)
-        
-        # Формируем результат
-        results = [
-            InlineQueryResultArticle(
-                id=result_id,
-                title="💬 Ответ Gemini",
-                description=response_text[:200] + "..." if len(response_text) > 200 else response_text,
-                input_message_content=InputTextMessageContent(
-                    message_text=formatted_text[:4096],
-                    parse_mode='HTML'
-                ),
-                thumbnail_url=avatar_url
-            )
-        ]
-        
-        await query.answer(results, cache_time=10)
-        log_activity(user_id, query.from_user.username, "inline", text[:30])
-        
+
+        await answer_single(
+            "💬 Ответ Gemini",
+            response_text[:200] + "..." if len(response_text) > 200 else response_text,
+            formatted_text,
+            cache=10
+        )
+        log_activity(user.id, user.username, "inline", text[:30])
+
     except asyncio.TimeoutError:
-        logger.warning(f"Inline query timeout for user {user_id}")
-        results = [
-            InlineQueryResultArticle(
-                id="timeout",
-                title="⏱️ Превышено время ожидания",
-                description="Попробуйте более короткий вопрос",
-                input_message_content=InputTextMessageContent(
-                    message_text="⏱️ Запрос занял слишком много времени. Попробуйте снова."
-                ),
-                thumbnail_url=avatar_url
-            )
-        ]
-        await query.answer(results, cache_time=5)
-        
+        logger.warning(f"Inline query timeout for user {user.id}")
+        await answer_single(
+            "⏱️ Превышено время ожидания",
+            "Попробуйте более короткий вопрос",
+            "⏱️ Запрос занял слишком много времени. Попробуйте снова.",
+            cache=5
+        )
+
     except Exception as e:
         logger.warning(f"Inline query error: {e}")
-        results = [
-            InlineQueryResultArticle(
-                id="error",
-                title="Ошибка",
-                description=str(e)[:100],
-                input_message_content=InputTextMessageContent(
-                    message_text=f"Ошибка: {str(e)[:200]}"
-                ),
-                thumbnail_url=avatar_url
-            )
-        ]
-        await query.answer(results, cache_time=5)
+        await answer_single(
+            "Ошибка",
+            str(e)[:100],
+            f"Ошибка: {str(e)[:200]}",
+            cache=5
+        )
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2777,10 +2766,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     # Всегда отвечаем на callback, чтобы убрать часы ожидания на кнопке
-    await query.answer()
+    await safe_answer_query(query)
 
     if not check_access(user_id):
-        await query.answer("⛔️ Нет доступа.", show_alert=False)
+        await safe_answer_query(query, text="⛔️ Нет доступа.", show_alert=False)
         return
 
     if 'photo_task' not in context.user_data:
@@ -2796,13 +2785,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.edit_message_text(f"⏱ Время ожидания истекло ({PHOTO_BUTTON_TIMEOUT // 60} мин). Отправьте фото заново.")
 
     action = query.data
-    photos_bytes = photo_data['photos']  # Теперь это список!
+    photos_bytes = photo_data['photos']
     photos_count = len(photos_bytes)
 
     if action == "photo_analyze":
         await query.edit_message_text(f"Анализирую {photos_count} фото..." if photos_count > 1 else "Анализирую...")
 
-        # Используем ОБЫЧНУЮ модель пользователя
+        # Используем модель пользователя
         model_key = get_model_key(context)
         model_icon = "💎" if model_key == 'pro' else "⚡"
 
@@ -2839,9 +2828,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_to_message_id=photo_data['message_id']
             )
 
-            # СОХРАНЯЕМ первое изображение в контексте для последующих вопросов
+            # Сохраняем первое изображение в контексте для последующих вопросов
             context.user_data['active_image'] = {
-                'photo_bytes': photos_bytes[0],  # Берём первое фото
+                'photo_bytes': photos_bytes[0],
                 'timestamp': time.time()
             }
 
@@ -2857,7 +2846,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "photo_edit":
         # Переводим в режим ожидания промта для редактирования
-        # Редактирование ВСЕГДА использует gemini-3-pro-image-preview (IMAGE_MODELS['pro'])
+        # Редактирование всегда использует gemini-3-pro-image-preview (IMAGE_MODELS['pro'])
         context.user_data['mode'] = 'awaiting_edit_prompt'
 
         if photos_count > 1:
@@ -2866,7 +2855,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "✏️ Введите описание того, что нужно изменить или добавить на этом фото:\n\n💎 Используется: <code>gemini-3-pro-image-preview</code>"
 
         await query.edit_message_text(msg, parse_mode='HTML')
-        # Данные фото НЕ удаляем, они понадобятся в handle_message
+        # Данные фото не удаляем, они понадобятся в handle_message
 
 
 # --- ЗАПУСК ---
@@ -2917,11 +2906,11 @@ if __name__ == '__main__':
 
     # Обработчики сообщений
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))  # Обработчик фото
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))  # Обработчик документов
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(InlineQueryHandler(handle_inline_query))  # Инлайн-режим
+    application.add_handler(InlineQueryHandler(handle_inline_query))
 
     # Глобальный обработчик ошибок
     application.add_error_handler(global_error_handler)
