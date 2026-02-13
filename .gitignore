@@ -1,0 +1,29 @@
+# Python кеш
+__pycache__/
+*.py[cod]
+*.so
+
+# Виртуальное окружение
+.venv/
+venv/
+
+# Секреты и переменные окружения
+.env
+
+# Логи и данные
+*.log
+activity_log.json
+allowed_users.json
+known_models.json
+
+# IDE и редакторы
+.idea/
+.vscode/
+*.code-workspace
+
+# Локальные скрипты
+*.ps1
+*.bat
+
+# Gemini agent
+.agent/
