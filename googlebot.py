@@ -1594,8 +1594,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Одиночное фото (без media_group_id) ---
 
     # Проверяем режим перевода -> перевод текста на изображении
-    is_translate_caption = caption_lower == 'пр' or caption_lower.startswith('пр ')
-    if context.user_data.get('mode') == 'translate' or is_translate_caption:
+    if context.user_data.get('mode') == 'translate':
         thinking_msg = await update.message.reply_text("Перевожу текст на изображении...", reply_to_message_id=update.message.message_id)
 
         try:
@@ -1714,6 +1713,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Сохраняем во временное хранилище как СПИСОК (для совместимости с альбомами)
             context.user_data['photo_task'] = {
                 'photos': [bytes(photo_bytes)],  # Список изображений
+                'caption': caption,  # Подпись к фото (используется при анализе)
                 'message_id': update.message.message_id,
                 'timestamp': time.time()
             }
@@ -2239,8 +2239,7 @@ async def _process_fast_commands(
         return True
 
     # Мгновенный перевод с текстом (пр <текст>)
-    # Поддерживаем пробел или перенос строки после команды
-    if lower_text.startswith(('пр ', 'пр\n', 'перевод ', 'перевод\n', 'translate ', 'translate\n')):
+    if lower_text.startswith('пр ') or lower_text.startswith('перевод ') or lower_text.startswith('translate '):
         if lower_text.startswith('translate '):
             text_to_translate = stripped[10:].strip()
         elif lower_text.startswith('перевод '):
@@ -2373,13 +2372,13 @@ async def _process_fast_commands(
 
         context.user_data['model'] = 'pro'
         reset_session(context)
-        await update.message.reply_text("<i>Pro</i> 💎", parse_mode='HTML', reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("Pro 💎", parse_mode='HTML', reply_to_message_id=update.message.message_id)
         return True
 
     if lower_text == 'ф':
         context.user_data['model'] = 'flash'
         reset_session(context)
-        await update.message.reply_text("<i>Flash</i> ⚡", parse_mode='HTML', reply_to_message_id=update.message.message_id)
+        await update.message.reply_text("Flash ⚡", parse_mode='HTML', reply_to_message_id=update.message.message_id)
         return True
 
     # Сброс контекста
@@ -2410,7 +2409,7 @@ async def _process_fast_commands(
         context.user_data['image_model'] = 'pro'
         context.user_data['mode'] = 'image_gen'
         await update.message.reply_text(
-            f"🎨 💎 <b>Pro</b>\n<code>{IMAGE_MODELS['pro']}</code>\n\n✏️ Опишите что нарисовать:",
+            f"🎨 💎 Pro\n{IMAGE_MODELS['pro']}\n\n✏️ Опишите что нарисовать:",
             parse_mode='HTML',
             reply_to_message_id=update.message.message_id
         )
@@ -2420,7 +2419,7 @@ async def _process_fast_commands(
         context.user_data['image_model'] = 'flash'
         context.user_data['mode'] = 'image_gen'
         await update.message.reply_text(
-            f"🎨 ⚡ <b>Flash</b>\n<code>{IMAGE_MODELS['flash']}</code>\n\n✏️ Опишите что нарисовать:",
+            f"🎨 ⚡ Flash\n{IMAGE_MODELS['flash']}\n\n✏️ Опишите что нарисовать:",
             parse_mode='HTML',
             reply_to_message_id=update.message.message_id
         )
@@ -2463,7 +2462,7 @@ async def _process_reply_to_photo(
         return False
 
     text = update.message.text
-    prompt = text.strip() if text.strip() else "Опиши подробно что на этом изображении"
+    prompt = text.strip() or "Сделай анализ фото"
 
     model_key = get_model_key(context)
     model_icon = "💎" if model_key == 'pro' else "⚡"
@@ -2936,11 +2935,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         model_key = get_model_key(context)
         model_icon = "💎" if model_key == 'pro' else "⚡"
 
-        # Формируем prompt и содержимое
-        if photos_count > 1:
-            prompt = f"Опиши подробно что на этих {photos_count} изображениях и как они связаны между собой"
+        # Формируем prompt: если есть подпись от пользователя — используем её
+        user_caption = photo_data.get('caption', '').strip()
+        if user_caption:
+            prompt = user_caption
         else:
-            prompt = "Опиши подробно что на этом изображении"
+            prompt = "Сделай анализ фото"
 
         try:
             # Формируем contents: все изображения + prompt
