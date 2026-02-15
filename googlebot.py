@@ -18,7 +18,8 @@ from google.genai import types as genai_types
 from PIL import Image
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, 
-    InlineQueryResultArticle, InputTextMessageContent, InlineQueryResultsButton
+    InlineQueryResultArticle, InlineQueryResultPhoto,
+    InputTextMessageContent, InlineQueryResultsButton
 )
 from telegram.constants import ChatType
 from telegram.ext import (
@@ -60,7 +61,7 @@ IMAGE_CONTEXT_TIMEOUT = 300   # Время жизни изображения в 
 
 # Telegram лимиты
 MAX_MESSAGE_LENGTH = 4000     # Максимальная длина сообщения
-ALBUM_WAIT_TIME = 1.5         # Секунды ожидания остальных фото альбома
+ALBUM_WAIT_TIME = 2.5         # Секунды ожидания остальных фото альбома
 MAX_ALBUM_PHOTOS = 10         # Максимум фото в альбоме для обработки
 
 # Системная инструкция для Flash — краткость и скорость
@@ -1229,14 +1230,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         activity_text = "нет данных"
 
-    status_text = f"""📊 **Статус (🧪 ТЕСТОВЫЙ)**
+    status_text = f"""📊 **Статус**
 
 🤖 Модель: **{model_key.upper()}**
 {model_name}
-
-💬 Сессия: {'активна ✅' if has_session else 'нет ❌'}
-⏱ Активность: {activity_text}
-⏳ Таймаут: {MEMORY_TIMEOUT // 60} мин.
 """
 
     if user_id == ADMIN_ID:
@@ -2271,7 +2268,7 @@ async def _process_fast_commands(
             return True
 
     # Включение режима YouTube саммари (без ссылки)
-    if lower_text in ['ю', 'ютуб', 'youtube']:
+    if lower_text in ['ю', 'ютуб', 'youtube', 'самари']:
         context.user_data['mode'] = 'youtube_mode'
         await update.message.reply_text(
             "📺 Отправьте ссылку на YouTube видео:",
@@ -2281,9 +2278,11 @@ async def _process_fast_commands(
         return True
 
     # Мгновенное саммари YouTube со ссылкой (ю <ссылка>)
-    if lower_text.startswith('ю ') or lower_text.startswith('ютуб ') or lower_text.startswith('youtube '):
+    if lower_text.startswith('ю ') or lower_text.startswith('ютуб ') or lower_text.startswith('youtube ') or lower_text.startswith('самари '):
         if lower_text.startswith('youtube '):
             url = stripped[8:].strip()
+        elif lower_text.startswith('самари '):
+            url = stripped[7:].strip()
         elif lower_text.startswith('ютуб '):
             url = stripped[5:].strip()
         else:
@@ -2375,7 +2374,7 @@ async def _process_fast_commands(
         await update.message.reply_text("Pro 💎", parse_mode='HTML', reply_to_message_id=update.message.message_id)
         return True
 
-    if lower_text == 'ф':
+    if lower_text in ['ф', 'флеш', 'flash']:
         context.user_data['model'] = 'flash'
         reset_session(context)
         await update.message.reply_text("Flash ⚡", parse_mode='HTML', reply_to_message_id=update.message.message_id)
@@ -2755,12 +2754,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.debug(f"Не удалось уведомить админа: {notify_err}")
 
 
+def _parse_inline_command(text: str) -> tuple[str, str]:
+    """
+    Парсит inline-запрос и определяет команду по префиксу.
+    Возвращает (command_type, argument).
+    """
+    lower = text.lower()
+
+    # Перевод: пр <текст> / перевод <текст>
+    if lower.startswith('пр ') or lower == 'пр':
+        return ('translate', text[3:].strip())
+    if lower.startswith('перевод ') or lower == 'перевод':
+        return ('translate', text[8:].strip())
+
+    # YouTube саммари: ю <ссылка> / ютуб <ссылка>
+    if lower.startswith('ю ') or lower == 'ю':
+        return ('youtube', text[2:].strip())
+    if lower.startswith('ютуб ') or lower == 'ютуб':
+        return ('youtube', text[5:].strip())
+
+    # YouTube превью: превью <ссылка> / пре <ссылка>
+    if lower.startswith('превью ') or lower == 'превью':
+        return ('preview', text[7:].strip())
+    if lower.startswith('пре ') or lower == 'пре':
+        return ('preview', text[4:].strip())
+
+    # Всё остальное — Gemini
+    return ('gemini', text)
+
+
 async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обрабатывает inline-запросы (@bot_name текст).
-    Placeholder-режим: API НЕ вызывается при печати.
-    Юзер кликает кнопку → в чат идёт "⏳ Генерирую ответ..." →
-    ChosenInlineResultHandler вызывает API и редактирует сообщение.
+    Поддерживает команды: пр (перевод), ю (YouTube), превью, и обычный вопрос Gemini.
     Требуется: /setinlinefeedback 100% в @BotFather
     """
     query = update.inline_query
@@ -2792,15 +2818,15 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # Пустой запрос — подсказка
+    # Пустой запрос — подсказка с доступными командами
     if not text:
         results = [
             InlineQueryResultArticle(
                 id=str(uuid.uuid4()),
-                title="💡 Введите вопрос",
-                description="Напишите вопрос и нажмите кнопку для отправки",
+                title="💡 Введите вопрос или команду",
+                description="пр <текст> · ю <ссылка> · превью <ссылка> · или просто вопрос",
                 input_message_content=InputTextMessageContent(
-                    message_text="💡 Используйте: @bot_name ваш вопрос",
+                    message_text="💡 Команды: пр, ю, превью — или просто вопрос",
                     parse_mode='HTML'
                 ),
                 thumbnail_url=avatar_url
@@ -2809,21 +2835,122 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(results, cache_time=60)
         return
 
-    # Есть текст — показываем кнопку "Спросить Gemini"
-    # API НЕ вызывается здесь — только после клика юзера
+    # Определяем команду по префиксу
+    cmd_type, cmd_arg = _parse_inline_command(text)
+
     # ВАЖНО: reply_markup обязательна! Без InlineKeyboardMarkup Telegram
     # не передаёт inline_message_id в ChosenInlineResult, и edit_message_text невозможен.
-    # Источник: https://core.telegram.org/bots/api#choseninlineresult
     loading_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⏳🔮 Генерирую ответ...", callback_data="inline_loading")]
+        [InlineKeyboardButton("⏳", callback_data="inline_loading")]
     ])
+
+    # --- ПЕРЕВОД ---
+    if cmd_type == 'translate':
+        if not cmd_arg:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid.uuid4()),
+                    title="🌐 Перевод",
+                    description="Введите: пр <текст для перевода>",
+                    input_message_content=InputTextMessageContent(
+                        message_text="🌐 Используйте: @bot пр <текст>"
+                    ),
+                    thumbnail_url=avatar_url
+                )
+            ]
+            await query.answer(results, cache_time=30)
+            return
+
+        results = [
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title="🌐 Перевести",
+                description=cmd_arg[:100],
+                input_message_content=InputTextMessageContent(
+                    message_text="🌐 Перевожу...",
+                    parse_mode='HTML'
+                ),
+                reply_markup=loading_keyboard,
+                thumbnail_url=avatar_url
+            )
+        ]
+        await query.answer(results, cache_time=0)
+        return
+
+    # --- YOUTUBE САММАРИ ---
+    if cmd_type == 'youtube':
+        if not cmd_arg:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid.uuid4()),
+                    title="📺 YouTube Саммари",
+                    description="Введите: ю <ссылка на видео>",
+                    input_message_content=InputTextMessageContent(
+                        message_text="📺 Используйте: @bot ю <ссылка>"
+                    ),
+                    thumbnail_url=avatar_url
+                )
+            ]
+            await query.answer(results, cache_time=30)
+            return
+
+        results = [
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title="📺 YouTube Саммари",
+                description=cmd_arg[:100],
+                input_message_content=InputTextMessageContent(
+                    message_text="📺 Загружаю саммари...",
+                    parse_mode='HTML'
+                ),
+                reply_markup=loading_keyboard,
+                thumbnail_url=avatar_url
+            )
+        ]
+        await query.answer(results, cache_time=0)
+        return
+
+    # --- YOUTUBE ПРЕВЬЮ (placeholder → фетч в handle_chosen_inline_result) ---
+    if cmd_type == 'preview':
+        if not cmd_arg:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid.uuid4()),
+                    title="🖼️ YouTube Превью",
+                    description="Введите: превью <ссылка на видео>",
+                    input_message_content=InputTextMessageContent(
+                        message_text="🖼️ Используйте: @bot превью <ссылка>"
+                    ),
+                    thumbnail_url=avatar_url
+                )
+            ]
+            await query.answer(results, cache_time=30)
+            return
+
+        results = [
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title="🖼️ YouTube Превью",
+                description=cmd_arg[:100],
+                input_message_content=InputTextMessageContent(
+                    message_text="🖼️ Загружаю превью...",
+                    parse_mode='HTML'
+                ),
+                reply_markup=loading_keyboard,
+                thumbnail_url=avatar_url
+            )
+        ]
+        await query.answer(results, cache_time=0)
+        return
+
+    # --- GEMINI (по умолчанию) ---
     results = [
         InlineQueryResultArticle(
             id=str(uuid.uuid4()),
             title="🔮 Спросить Gemini",
             description=text[:100],
             input_message_content=InputTextMessageContent(
-                message_text="...",
+                message_text="Ищу ответ (╭ರ_•́)╭",
                 parse_mode='HTML'
             ),
             reply_markup=loading_keyboard,
@@ -2836,7 +2963,8 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Вызывается ПОСЛЕ того, как юзер кликнул на inline-результат.
-    Здесь происходит реальный запрос к Gemini API и редактирование сообщения.
+    Роутинг по команде: перевод, YouTube саммари или Gemini вопрос.
+    Превью обрабатывается в handle_inline_query (не нужен ChosenInlineResult).
     Требуется: /setinlinefeedback 100% в @BotFather
     """
     result = update.chosen_inline_result
@@ -2848,15 +2976,80 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
     if not text or not inline_message_id:
         return
 
+    # Определяем тип команды
+    cmd_type, cmd_arg = _parse_inline_command(text)
+
     try:
-        # Вызываем Gemini Flash с поиском
+        # --- ПЕРЕВОД ---
+        if cmd_type == 'translate' and cmd_arg:
+            prompt_text = f"Переведи этот текст на русский язык максимально точно и литературно, сохраняя стиль оригинала. Не добавляй никаких комментариев, только перевод:\n\n{cmd_arg}"
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: gemini_client.models.generate_content(
+                        model=MODELS['flash'],
+                        contents=prompt_text
+                    )
+                ),
+                timeout=TIMEOUT_SHORT
+            )
+            response_text = response.text if response and response.text else "Не удалось перевести"
+            formatted_text = format_for_telegram(response_text)
+            await context.bot.edit_message_text(
+                inline_message_id=inline_message_id,
+                text=f"<b>🌐 Перевод:</b>\n{formatted_text}",
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup([])
+            )
+            log_activity(user.id, user.username, "inline_translate", cmd_arg[:30])
+            return
+
+        # --- YOUTUBE САММАРИ ---
+        if cmd_type == 'youtube' and cmd_arg:
+            result_yt = await summarize_youtube(cmd_arg)
+            if result_yt['success']:
+                formatted_text = format_for_telegram(result_yt['summary'])
+                await context.bot.edit_message_text(
+                    inline_message_id=inline_message_id,
+                    text=f"<b>📺 YouTube Саммари:</b>\n{formatted_text}",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([])
+                )
+            else:
+                await context.bot.edit_message_text(
+                    inline_message_id=inline_message_id,
+                    text=f"❌ {result_yt['error']}",
+                    reply_markup=InlineKeyboardMarkup([])
+                )
+            log_activity(user.id, user.username, "inline_youtube", cmd_arg[:30])
+            return
+
+        # --- YOUTUBE ПРЕВЬЮ ---
+        if cmd_type == 'preview' and cmd_arg:
+            preview = await asyncio.to_thread(get_youtube_preview, cmd_arg)
+            if preview['success']:
+                await context.bot.edit_message_text(
+                    inline_message_id=inline_message_id,
+                    text=f"🎬 <b>{escape_html(preview['title'])}</b>\n{preview['original_url']}",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([])
+                )
+            else:
+                await context.bot.edit_message_text(
+                    inline_message_id=inline_message_id,
+                    text=f"❌ {preview['error']}",
+                    reply_markup=InlineKeyboardMarkup([])
+                )
+            log_activity(user.id, user.username, "inline_preview", cmd_arg[:30])
+            return
+
+        # --- GEMINI (по умолчанию) ---
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: gemini_client.models.generate_content(
                     model=MODELS['flash'],
                     contents=text,
                     config=genai_types.GenerateContentConfig(
-                        system_instruction="Ответ должен быть как возможно кратким. Используй интернет для поиска актуальной информации.",
+                        system_instruction="Отвечай содержательно, но ответ НЕ ДОЛЖЕН превышать 3800 символов. Если тема обширная — выдели главное, опусти второстепенное. Используй интернет для поиска актуальной информации.",
                         tools=SEARCH_TOOLS
                     )
                 )
@@ -2867,10 +3060,15 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
         response_text = response.text if response and response.text else "Не удалось получить ответ"
         formatted_text = format_for_telegram(response_text)
 
-        # Заменяем placeholder на реальный ответ и убираем кнопку-заглушку
+        # Длинные ответы сворачиваем в expandable blockquote
+        if len(formatted_text) > 500:
+            body = f"<blockquote expandable>{formatted_text}</blockquote>"
+        else:
+            body = formatted_text
+
         await context.bot.edit_message_text(
             inline_message_id=inline_message_id,
-            text=f"<b>Gemini:</b> {formatted_text}",
+            text=f"<b>✦ Gemini:</b> {body}\nฅ≽^◕⩊◕^≼⊃━✦゜",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([])
         )
