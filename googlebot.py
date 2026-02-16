@@ -929,14 +929,25 @@ async def handle_image_generation(update: Update, context, prompt: str, user_id:
         result_data, used_model = await generate_image(prompt, context)
         await thinking_msg.delete()
 
-        # Сначала текст с названием модели
-        model_text = f"Модель: {used_model.capitalize()}{model_icon}"
+        # Сохраняем промт для перегенерации
+        context.user_data['last_image_prompt'] = prompt
+
+        # Кнопки перегенерации и изменения промта
+        regen_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_regen"),
+                InlineKeyboardButton("✏️ Изменить промт", callback_data="img_new_prompt")
+            ]
+        ])
+
+        # Сначала текст с моделью и кнопкой
         await update.message.reply_text(
-            model_text,
+            f"Модель: {used_model.capitalize()}{model_icon}",
+            reply_markup=regen_keyboard,
             reply_to_message_id=update.message.message_id
         )
 
-        # Потом сама картинка
+        # Потом само фото
         await update.message.reply_photo(
             photo=result_data,
             reply_to_message_id=update.message.message_id
@@ -1767,8 +1778,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_error("EDIT_PHOTO_SAVE", str(e), user_id)
             return await update.message.reply_text("Ошибка при сохранении фото")
 
+    # Получаем модель для изображений
+    model_key = context.user_data.get('image_model', 'pro')
+    model_icon = "💎" if model_key == 'pro' else "⚡"
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-    thinking_msg = await update.message.reply_text("🎨 Редактирую изображение...", reply_to_message_id=update.message.message_id)
+    thinking_msg = await update.message.reply_text(
+        f"🎨 {model_icon} Генерирую изображение...",
+        reply_to_message_id=update.message.message_id
+    )
 
     try:
         # Получаем фото (берём самое большое разрешение)
@@ -1776,18 +1794,28 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_file = await photo.get_file()
         photo_bytes = await photo_file.download_as_bytearray()
 
-        # Получаем модель для изображений
-        model_key = context.user_data.get('image_model', 'pro')
-        model_icon = "💎" if model_key == 'pro' else "⚡"
-
         # Редактируем
         result_data, used_model = await edit_image([bytes(photo_bytes)], prompt, user_id, model_key)
         await thinking_msg.delete()
 
-        # Сначала текстовое сообщение с информацией
+        # Сохраняем данные для перегенерации
+        context.user_data['last_edit_data'] = {
+            'photos': [bytes(photo_bytes)],
+            'prompt': prompt,
+        }
+
+        # Кнопки перегенерации и изменения промта
+        edit_regen_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_edit_regen"),
+                InlineKeyboardButton("✏️ Изменить промт", callback_data="img_edit_new_prompt")
+            ]
+        ])
+
+        # Сначала текст с моделью и кнопкой
         await update.message.reply_text(
-            f"{model_icon} Отредактировано через <b>{IMAGE_MODELS[used_model]}</b>\n\n✏️ Запрос: {prompt}",
-            parse_mode='HTML',
+            f"Модель: {used_model.capitalize()}{model_icon}",
+            reply_markup=edit_regen_keyboard,
             reply_to_message_id=update.message.message_id
         )
 
@@ -1877,27 +1905,41 @@ async def process_album_delayed(media_group_id: str, update: Update, context: Co
             )
             return
 
+        # Получаем модель для изображений
+        model_key = context.user_data.get('image_model', 'pro')
+        model_icon = "💎" if model_key == 'pro' else "⚡"
+
         # Редактируем альбом
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         thinking_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text="🎨 Редактирую изображение",
+            text=f"🎨 {model_icon} Генерирую изображение...",
             reply_to_message_id=message_id
         )
 
         try:
-            # Получаем модель для изображений
-            model_key = context.user_data.get('image_model', 'pro')
-            model_icon = "💎" if model_key == 'pro' else "⚡"
-
             result_data, used_model = await edit_image(photos_bytes, prompt, user_id, model_key)
             await delete_safe(thinking_msg)
 
-            # Сначала текстовое сообщение с информацией
+            # Сохраняем данные для перегенерации
+            context.user_data['last_edit_data'] = {
+                'photos': photos_bytes,
+                'prompt': prompt,
+            }
+
+            # Кнопки перегенерации и изменения промта
+            edit_regen_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_edit_regen"),
+                    InlineKeyboardButton("✏️ Изменить промт", callback_data="img_edit_new_prompt")
+                ]
+            ])
+
+            # Сначала текст с моделью и кнопкой
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"{model_icon} Отредактировано {photos_count} фото через <b>{IMAGE_MODELS[used_model]}</b>\n\n✏️ Запрос: {prompt}",
-                parse_mode='HTML',
+                text=f"Модель: {used_model.capitalize()}{model_icon}",
+                reply_markup=edit_regen_keyboard,
                 reply_to_message_id=message_id
             )
 
@@ -2050,7 +2092,7 @@ async def _process_photo_edit_prompt(
     Обрабатывает ввод промта для редактирования фото (mode='awaiting_edit_prompt').
     Возвращает True если обработано.
     """
-    if context.user_data.get('mode') != 'awaiting_edit_prompt':
+    if context.user_data.get('mode') not in ['awaiting_edit_prompt', 'awaiting_new_edit_prompt']:
         return False
 
     if 'photo_task' not in context.user_data:
@@ -2065,28 +2107,38 @@ async def _process_photo_edit_prompt(
     photos_count = len(photos_bytes)
     orig_msg_id = photo_task['message_id']
 
+    model_key = context.user_data.get('image_model', 'pro')
+    model_icon = "💎" if model_key == 'pro' else "⚡"
+
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
     thinking_msg = await update.message.reply_text(
-        f"🎨 Редактирую {photos_count} изображения..." if photos_count > 1 else "🎨 Редактирую изображение...",
+        f"🎨 {model_icon} Генерирую изображение...",
         reply_to_message_id=update.message.message_id
     )
 
     try:
-        model_key = context.user_data.get('image_model', 'pro')
-        model_icon = "💎" if model_key == 'pro' else "⚡"
 
         result_data, used_model = await edit_image(photos_bytes, prompt, user_id, model_key)
         await thinking_msg.delete()
 
-        # Формируем caption
-        if photos_count > 1:
-            caption = f"{model_icon} Отредактировано {photos_count} фото через <b>{IMAGE_MODELS[used_model]}</b>\n\n✏️ Запрос: {prompt}"
-        else:
-            caption = f"{model_icon} Отредактировано через <b>{IMAGE_MODELS[used_model]}</b>\n\n✏️ Запрос: {prompt}"
+        # Сохраняем данные для перегенерации (повторное редактирование)
+        context.user_data['last_edit_data'] = {
+            'photos': photos_bytes,
+            'prompt': prompt,
+        }
 
+        # Кнопки перегенерации и изменения промта
+        edit_regen_keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_edit_regen"),
+                InlineKeyboardButton("✏️ Изменить промт", callback_data="img_edit_new_prompt")
+            ]
+        ])
+
+        # Сначала текст с моделью и кнопкой
         await update.message.reply_text(
-            caption,
-            parse_mode='HTML',
+            f"Модель: {used_model.capitalize()}{model_icon}",
+            reply_markup=edit_regen_keyboard,
             reply_to_message_id=orig_msg_id
         )
         await update.message.reply_photo(photo=result_data)
@@ -2624,7 +2676,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 5. ДИСПЕТЧЕР — делегирование helper-функциям
 
-    # Редактирование фото по кнопке (mode='awaiting_edit_prompt')
+    # --- Обработка режимов ожидания промта после кнопок ---
+    
+    # Новый промт для РЕДАКТИРОВАНИЯ (кнопка «✏️ Изменить промт»)
+    if context.user_data.get('mode') == 'awaiting_new_edit_prompt':
+        data = context.user_data.get('last_edit_data')
+        if not data:
+            context.user_data.pop('mode', None)
+            return await update.message.reply_text("Данные для редактирования не найдены. Отправьте фото заново.")
+        
+        # Подменяем photo_task данными из памяти
+        context.user_data['photo_task'] = {
+            'photos': data['photos'],
+            'message_id': update.message.message_id,
+            'timestamp': time.time()
+        }
+        # Вызываем функцию (режим НЕ удаляем здесь, он удалится внутри функции на успехе)
+        return await _process_photo_edit_prompt(update, context, user_id)
+
+    # Новый промт для генерации (кнопка «✏️ Изменить промт»)
+    if context.user_data.get('mode') == 'awaiting_new_image_prompt':
+        context.user_data.pop('mode', None)
+        return await _process_image_gen_mode(update, context, text, user_id)
+
+    # Стандартное редактирование фото по кнопке (mode='awaiting_edit_prompt')
     if await _process_photo_edit_prompt(update, context, user_id):
         return
 
@@ -3049,7 +3124,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
                     model=MODELS['flash'],
                     contents=text,
                     config=genai_types.GenerateContentConfig(
-                        system_instruction="Отвечай содержательно, но ответ НЕ ДОЛЖЕН превышать 3800 символов. Если тема обширная — выдели главное, опусти второстепенное. Используй интернет для поиска актуальной информации.",
+                        system_instruction="Отвечай кратко, но информативно. Используй интернет, если чего то не знаешь.",
                         tools=SEARCH_TOOLS
                     )
                 )
@@ -3095,7 +3170,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия на кнопки под фото/альбом"""
+    """Обрабатывает нажатия на кнопки под фото/альбом и перегенерацию"""
     query = update.callback_query
     user_id = query.from_user.id
 
@@ -3108,6 +3183,130 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not check_access(user_id):
         await query.answer("⛔️ Нет доступа.", show_alert=False)
+        return
+
+    # --- Перегенерация изображения ---
+    if query.data == "img_regen":
+        prompt = context.user_data.get('last_image_prompt')
+        if not prompt:
+            await query.answer("Промт не найден. Отправьте запрос заново.", show_alert=True)
+            return
+
+        model_key = context.user_data.get('image_model', 'pro')
+        model_icon = "💎" if model_key == 'pro' else "⚡"
+
+        # Убираем кнопку со старого текста, показываем статус генерации
+        try:
+            await query.edit_message_text(
+                text=f"🔄 Перегенерирую {model_icon}..."
+            )
+        except Exception:
+            pass
+
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+            result_data, used_model = await generate_image(prompt, context)
+
+            # Кнопки перегенерации и изменения промта
+            regen_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_regen"),
+                    InlineKeyboardButton("✏️ Изменить промт", callback_data="img_new_prompt")
+                ]
+            ])
+
+            # Текст с моделью и кнопкой
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"Модель: {used_model.capitalize()}{model_icon}",
+                reply_markup=regen_keyboard
+            )
+
+            # Фото отдельно
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=result_data
+            )
+
+            log_activity(user_id, query.from_user.username, "img_regen", prompt[:30])
+
+        except Exception as e:
+            log_error("IMG_REGEN", str(e), user_id)
+            error_msg = format_gemini_error(e, "IMG_REGEN")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=error_msg,
+                parse_mode='HTML'
+            )
+        return
+
+    # --- Изменение промта для генерации ---
+    if query.data == "img_new_prompt":
+        context.user_data['mode'] = 'awaiting_new_image_prompt'
+        await query.edit_message_text("✏️ Введите новый промт для генерации изображения:")
+        return
+
+    # --- Перегенерация РЕДАКТИРОВАНИЯ ---
+    if query.data == "img_edit_regen":
+        data = context.user_data.get('last_edit_data')
+        if not data:
+            await query.answer("Данные для редактирования не найдены. Отправьте фото заново.", show_alert=True)
+            return
+
+        photos_bytes = data['photos']
+        prompt = data['prompt']
+        model_key = context.user_data.get('image_model', 'pro')
+        model_icon = "💎" if model_key == 'pro' else "⚡"
+
+        # Убираем кнопку со старого текста, показываем статус
+        try:
+            await query.edit_message_text(
+                text=f"🔄 Перегенерирую редактирование {model_icon}..."
+            )
+        except Exception:
+            pass
+
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+            result_data, used_model = await edit_image(photos_bytes, prompt, user_id, model_key)
+
+            # Кнопки перегенерации и изменения промта
+            edit_regen_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_edit_regen"),
+                    InlineKeyboardButton("✏️ Изменить промт", callback_data="img_edit_new_prompt")
+                ]
+            ])
+
+            # Текст с моделью и кнопкой
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"Модель: {used_model.capitalize()}{model_icon}",
+                reply_markup=edit_regen_keyboard
+            )
+
+            # Фото отдельно
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=result_data
+            )
+
+            log_activity(user_id, query.from_user.username, "img_edit_regen", prompt[:30])
+
+        except Exception as e:
+            log_error("IMG_EDIT_REGEN", str(e), user_id)
+            error_msg = format_gemini_error(e, "IMG_EDIT_REGEN")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=error_msg,
+                parse_mode='HTML'
+            )
+        return
+
+    # --- Изменение промта для РЕДАКТИРОВАНИЯ ---
+    if query.data == "img_edit_new_prompt":
+        context.user_data['mode'] = 'awaiting_new_edit_prompt'
+        await query.edit_message_text("✏️ Введите новый промт для редактирования исходного изображения:")
         return
 
     if 'photo_task' not in context.user_data:

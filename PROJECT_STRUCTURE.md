@@ -8,7 +8,7 @@
 
 ```
 bot/
-├── googlebot.py       # 🎯 Основной код бота (~2412 строк)
+├── googlebot.py       # 🎯 Основной код бота (~3483 строки)
 ├── README.md          # 📖 Документация для пользователей
 ├── PROJECT_STRUCTURE.md # 👈 Этот файл
 ├── requirements.txt   # 📦 Зависимости Python (на сервере)
@@ -36,11 +36,11 @@ bot/
 | `847-1177` | **Медиа-сервисы** | `generate_image()`, `edit_image()`, YouTube Саммари |
 | `1178-1467` | **Команды бота** | `/start`, `/help`, `/status`, `/models`, управление доступом |
 | `1468-1547` | **Обработчик голоса** | Голосовые сообщения в текст |
-| `1548-1952` | **Фото и Альбомы** | `handle_photo()`, `process_album_delayed()` |
-| `1953-2045` | **Обработчик документов** | Анализ файлов (PDF, TXT и др.) |
-| `2046-2756` | **Обработчик сообщений** | Диспетчер `handle_message()` и хелперы (Р, Пр, Ю, К) |
-| `2757-2897` | **Инлайн-режим** | `handle_inline_query()`, `handle_chosen_inline_result()` |
-| `2898-3087` | **Callback-и и Запуск** | `button_callback()`, `main()`, `post_init()` |
+| `1548-2060` | **Фото и Альбомы** | `handle_photo()`, `process_album_delayed()`, `_process_photo_edit_prompt` |
+| `2061-2150` | **Обработчик документов** | Анализ файлов (PDF, TXT и др.) |
+| `2151-2850` | **Обработчик сообщений** | Диспетчер `handle_message()` и хелперы (Р, Пр, Ю, К) |
+| `2851-3000` | **Инлайн-режим** | `handle_inline_query()`, `handle_chosen_inline_result()` |
+| `3001-3483` | **Callback-и и Запуск** | `button_callback()`, `main()`, `post_init()` |
 
 ---
 
@@ -169,6 +169,10 @@ SEARCH_TOOLS = [
 | `photo_edit`    | ✏️ Редактировать фото   |
 | `album_edit`    | ✏️ Редактировать альбом |
 | `photo_add_caption` | 📝 Добавить описание  |
+| `img_regen`     | 🔄 Перегенерировать картинку |
+| `img_new_prompt` | ✏️ Изменить промт генерации |
+| `img_edit_regen` | 🔄 Перегенерировать редактирование |
+| `img_edit_new_prompt` | ✏️ Изменить промт редактирования |
 
 ---
 
@@ -240,6 +244,7 @@ SEARCH_TOOLS = [
 | `last_activity` | `float` | Timestamp последней активности        |
 | `photo_task`    | `dict`  | Данные фото для кнопок                |
 | `active_image`  | `dict`  | Изображение в контексте               |
+| `last_image_prompt` | `str` | Последний промт генерации (для перегенерации) |
 
 ### Возможные значения `mode`:
 
@@ -251,6 +256,8 @@ SEARCH_TOOLS = [
 | `awaiting_edit_prompt` | Ожидание промта редактирования   |
 | `awaiting_edit_photo`  | Ожидание фото для редактирования |
 | `awaiting_photo_analyze_prompt` | Ожидание описания/вопроса к фото |
+| `awaiting_new_image_prompt` | Ожидание нового промта генерации |
+| `awaiting_new_edit_prompt` | Ожидание нового промта редактирования |
 
 ---
 
