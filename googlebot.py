@@ -11,6 +11,7 @@ import platform
 import psutil
 import requests
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 
 from google import genai as genai_client
@@ -19,7 +20,8 @@ from PIL import Image
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, 
     InlineQueryResultArticle, InlineQueryResultPhoto,
-    InputTextMessageContent, InlineQueryResultsButton
+    InputTextMessageContent, InlineQueryResultsButton,
+    InputMediaPhoto
 )
 from telegram.constants import ChatType
 from telegram.ext import (
@@ -31,8 +33,11 @@ from telegram.error import NetworkError
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
 
+# Базовая папка скрипта
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Загрузка переменных окружения
-env_path = os.path.join(os.path.dirname(__file__), '.env')
+env_path = os.path.join(BASE_DIR, '.env')
 load_dotenv(dotenv_path=env_path)
 
 # --- КОНФИГУРАЦИЯ ---
@@ -54,7 +59,7 @@ MAX_RETRIES = 2
 
 # Таймауты (в секундах)
 TIMEOUT_SHORT = 60        # Перевод, YouTube саммари — обычно 5-15 сек
-TIMEOUT_MEDIUM = 90       # Gemini чат с google_search — может искать долго
+TIMEOUT_MEDIUM = 300      # Gemini чат с google_search — может искать долго
 TIMEOUT_LONG = 180        # Генерация/редактирование изображений — самые долгие
 PHOTO_BUTTON_TIMEOUT = 180    # Время жизни кнопок под фото (3 мин)
 IMAGE_CONTEXT_TIMEOUT = 300   # Время жизни изображения в контексте (5 мин)
@@ -75,12 +80,11 @@ SYSTEM_INSTRUCTION_FLASH = """Ты — быстрый помощник. МАКС
 
 # Системная инструкция для Pro — глубина и анализ
 SYSTEM_INSTRUCTION_PRO = """Ты — интеллектуальный помощник с фокусом на глубину мысли.
-
 • Используй интернет для поиска информации
 """
 
 # Файл с доступами
-USERS_FILE = 'allowed_users.json'
+USERS_FILE = os.path.join(BASE_DIR, 'allowed_users.json')
 
 # Клиент нового SDK (для чатов с google_search и генерации изображений)
 gemini_client = genai_client.Client(api_key=GEMINI_API_KEY)
@@ -97,10 +101,15 @@ IMAGE_MODELS = {
     'flash': 'gemini-2.5-flash-image'     # Nano Banana Flash (1024px, быстрый)
 }
 
+# Ссылки для инлайн-заглушек
+avatar_url = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/logo.jpg"
+BLACK_SQUARE_URL = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/black.jpg" # Нейтральный квадрат
+
+
 # Настройка логирования с ротацией
 
 # Константы для логирования
-LOG_FILE = 'bot.log'
+LOG_FILE = os.path.join(BASE_DIR, 'bot.log')
 LOG_MAX_BYTES = 50 * 1024 * 1024  # 50 МБ максимум на файл
 LOG_BACKUP_COUNT = 1  # Хранить 1 бэкап (итого макс ~100 МБ)
 ACTIVITY_LOG_MAX_ENTRIES = 500  # Максимум записей в activity_log
@@ -149,10 +158,10 @@ def cleanup_log_files() -> None:
         retention_sec = max(LOG_RETENTION_DAYS, 0) * 86400
         log_files = []
 
-        for name in os.listdir('.'):
-            if name == LOG_FILE or name.startswith(f"{LOG_FILE}."):
+        for name in os.listdir(BASE_DIR):
+            if name == os.path.basename(LOG_FILE) or name.startswith(f"{os.path.basename(LOG_FILE)}."):
                 try:
-                    path = os.path.join('.', name)
+                    path = os.path.join(BASE_DIR, name)
                     stat = os.stat(path)
                     if retention_sec and (now - stat.st_mtime) > retention_sec:
                         os.remove(path)
@@ -181,7 +190,7 @@ def cleanup_log_files() -> None:
 
 def get_latest_models() -> dict[str, str]:
     """Возвращает актуальные версии моделей Gemini."""
-    required_pro = 'gemini-3-pro-preview'
+    required_pro = 'gemini-3.1-pro-preview'
     required_flash = 'gemini-3-flash-preview'  # Фиксируем версию модели
 
     try:
@@ -216,7 +225,7 @@ def initialize_models() -> None:
         logger.error(f"Critical Error: {e}")
         # Фоллбек для запуска без сети (генерации могут не работать)
         MODELS.update({
-            'pro': 'gemini-3-pro-preview',
+            'pro': 'gemini-3.1-pro-preview',
             'flash': 'gemini-flash-latest'
         })
         print(f"Работаем с дефолтными моделями (Offline mode): {MODELS}")
@@ -294,12 +303,11 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
         except Exception as notify_err:
             logger.debug(f"Не удалось уведомить пользователя об ошибке: {notify_err}")
 
-# --- ЛОГИРОВАНИЕ АКТИВНОСТИ ПОЛЬЗОВАТЕЛЕЙ ---
 # Часовой пояс Киева
-KYIV_TZ = timezone(timedelta(hours=2))  # UTC+2
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 # Файл для логов активности
-ACTIVITY_LOG_FILE = 'activity_log.json'
+ACTIVITY_LOG_FILE = os.path.join(BASE_DIR, 'activity_log.json')
 
 # Структура логов
 user_activity = []
@@ -341,7 +349,7 @@ def save_activity_log() -> None:
     if not SAVE_ACTIVITY_LOG:
         return
     try:
-        with open(ACTIVITY_LOG_FILE, 'w') as f:
+        with open(ACTIVITY_LOG_FILE, 'w', encoding='utf-8') as f:
             json.dump(user_activity, f)
     except Exception as e:
         logger.warning(f"Activity log save error: {e}")
@@ -354,7 +362,7 @@ def load_activity_log() -> None:
     global user_activity
     if os.path.exists(ACTIVITY_LOG_FILE):
         try:
-            with open(ACTIVITY_LOG_FILE, 'r') as f:
+            with open(ACTIVITY_LOG_FILE, 'r', encoding='utf-8') as f:
                 user_activity = json.load(f)
             # Оставляем только записи с начала текущего дня
             day_start = get_day_start()
@@ -376,7 +384,7 @@ def load_users() -> None:
 
     if os.path.exists(USERS_FILE):
         try:
-            with open(USERS_FILE, 'r') as f:
+            with open(USERS_FILE, 'r', encoding='utf-8') as f:
                 allowed_users.update(set(json.load(f)))
         except Exception as e:
             logger.warning(f"Ошибка загрузки {USERS_FILE}: {e}")
@@ -384,7 +392,7 @@ def load_users() -> None:
 
 def save_users() -> None:
     try:
-        with open(USERS_FILE, 'w') as f:
+        with open(USERS_FILE, 'w', encoding='utf-8') as f:
             json.dump(list(allowed_users), f)
     except Exception as e:
         logger.warning(f"Ошибка сохранения пользователей: {e}")
@@ -929,25 +937,14 @@ async def handle_image_generation(update: Update, context, prompt: str, user_id:
         result_data, used_model = await generate_image(prompt, context)
         await thinking_msg.delete()
 
-        # Сохраняем промт для перегенерации
-        context.user_data['last_image_prompt'] = prompt
-
-        # Кнопки перегенерации и изменения промта
-        regen_keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_regen"),
-                InlineKeyboardButton("✏️ Изменить промт", callback_data="img_new_prompt")
-            ]
-        ])
-
-        # Сначала текст с моделью и кнопкой
+        # Сначала текст с названием модели
+        model_text = f"Модель: {used_model.capitalize()}{model_icon}"
         await update.message.reply_text(
-            f"Модель: {used_model.capitalize()}{model_icon}",
-            reply_markup=regen_keyboard,
+            model_text,
             reply_to_message_id=update.message.message_id
         )
 
-        # Потом само фото
+        # Потом сама картинка
         await update.message.reply_photo(
             photo=result_data,
             reply_to_message_id=update.message.message_id
@@ -1004,11 +1001,13 @@ def get_youtube_preview(url: str) -> dict:
         data = response.json()
         
         # Thumbnail URL (максимальное качество)
-        thumbnail_url = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+        # oEmbed часто возвращает hqdefault, если maxresdefault нет
+        thumbnail_url = data.get("thumbnail_url") or f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
         
         return {
             "success": True,
             "title": data.get("title", "Без названия"),
+            "author": data.get("author_name", "YouTube"),
             "thumbnail_url": thumbnail_url,
             "original_url": url
         }
@@ -1438,35 +1437,31 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /1model - 💎 Gemini Pro
 /2model - ⚡ Gemini Flash
 
-**⚡ Быстрые команды ввиде букв:**
+**⚡ Быстрые команды:**
 • **П** — Gemini Pro | **Ф** — Gemini Flash
-• **Ю** — YouTube поиск/саммари (ссылку вставлять в сообщении)
-• Автопоиск Google и анализ ссылок
+• **Пр** + текст — 🌐 Перевод на русский
+• **Ю** + ссылка — 📺 YouTube саммари
+• **Превью** + ссылка — 🖼️ YouTube превью
+• **К** + описание — 🎨 Генерация картинки
+• **Р** — ✏️ Режим редактирования фото
+
+**🔍 Инлайн-режим** (в любом чате):
+• @bot **пр** hello — перевод
+• @bot **ю** ссылка — саммари
+• @bot **превью** ссылка — превью
+• @bot вопрос — ответ Gemini
 
 **🖼️ Изображения:**
-/imagepro - 💎 Pro модель (Nano banano Pro)
-/imageflash - ⚡ Flash модель (Nano banano Flash)
-• Напишите в чат букву **К** + `<описание>` — произойдет генерация картинки
-• Напишите в чат букву **Р** (или **Редактировать**) — включится режим редактирования, затем отправьте фото
-• Напишите в чат букву **Р** + `<инструкция>` + Фото — сразу редактирование фото
-• Напишите в чат буквы **Пр** + текст — перевод текста на русский (литературный перевод)
+/imagepro - 💎 Pro | /imageflash - ⚡ Flash
+• Отправьте фото → кнопки Анализировать | ✏️ Редактировать
+• 📷 Альбом (2-10 фото) → поддержка нескольких изображений
+• Фото + подпись → мгновенный ответ
 
-**📷 Мультимодальность:**
-• Отправьте фото → появляются кнопки Анализировать | ✏️ Редактировать
-• 📷 **Альбом (2-10 фото)** → поддержка нескольких изображений!
-• После анализа — 5 мин контекста для вопросов об изображении
-• Фото + подпись → мгновенный ответ с контекстом
+**📄 Документы:** PDF, TXT, CSV, JSON → суммаризация
 
-**📄 Бот принимает документы:**
-PDF, TXT, CSV, JSON → суммаризация или ответ
-
-**⏱ Сброс и выход:**
-**.** — полный сброс (контекст + изображение + режим)
-**выход** / **exit** — выход из режима (перевод, YouTube, генерация)
-/start — полный сброс сессии
-Автосброс — через 5/3 минут бездействия
-
-**🎙️ Голос:** голосовое → текст (только для флеш)
+**⏱ Сброс:**
+**.** — полный сброс | **выход** — выход из режима
+🎙️ Голос → текст (Flash)
 
 **👤 Админ:** /add ID /del ID"""
     await update.message.reply_text(format_for_telegram(help_text), parse_mode='HTML')
@@ -1778,15 +1773,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_error("EDIT_PHOTO_SAVE", str(e), user_id)
             return await update.message.reply_text("Ошибка при сохранении фото")
 
-    # Получаем модель для изображений
-    model_key = context.user_data.get('image_model', 'pro')
-    model_icon = "💎" if model_key == 'pro' else "⚡"
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-    thinking_msg = await update.message.reply_text(
-        f"🎨 {model_icon} Генерирую изображение...",
-        reply_to_message_id=update.message.message_id
-    )
+    thinking_msg = await update.message.reply_text("🎨 Редактирую изображение...", reply_to_message_id=update.message.message_id)
 
     try:
         # Получаем фото (берём самое большое разрешение)
@@ -1794,28 +1782,18 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_file = await photo.get_file()
         photo_bytes = await photo_file.download_as_bytearray()
 
+        # Получаем модель для изображений
+        model_key = context.user_data.get('image_model', 'pro')
+        model_icon = "💎" if model_key == 'pro' else "⚡"
+
         # Редактируем
         result_data, used_model = await edit_image([bytes(photo_bytes)], prompt, user_id, model_key)
         await thinking_msg.delete()
 
-        # Сохраняем данные для перегенерации
-        context.user_data['last_edit_data'] = {
-            'photos': [bytes(photo_bytes)],
-            'prompt': prompt,
-        }
-
-        # Кнопки перегенерации и изменения промта
-        edit_regen_keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_edit_regen"),
-                InlineKeyboardButton("✏️ Изменить промт", callback_data="img_edit_new_prompt")
-            ]
-        ])
-
-        # Сначала текст с моделью и кнопкой
+        # Сначала текстовое сообщение с информацией
         await update.message.reply_text(
-            f"Модель: {used_model.capitalize()}{model_icon}",
-            reply_markup=edit_regen_keyboard,
+            f"{model_icon} Отредактировано через <b>{IMAGE_MODELS[used_model]}</b>\n\n✏️ Запрос: {prompt}",
+            parse_mode='HTML',
             reply_to_message_id=update.message.message_id
         )
 
@@ -1905,41 +1883,27 @@ async def process_album_delayed(media_group_id: str, update: Update, context: Co
             )
             return
 
-        # Получаем модель для изображений
-        model_key = context.user_data.get('image_model', 'pro')
-        model_icon = "💎" if model_key == 'pro' else "⚡"
-
         # Редактируем альбом
         await context.bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         thinking_msg = await context.bot.send_message(
             chat_id=chat_id,
-            text=f"🎨 {model_icon} Генерирую изображение...",
+            text="🎨 Редактирую изображение",
             reply_to_message_id=message_id
         )
 
         try:
+            # Получаем модель для изображений
+            model_key = context.user_data.get('image_model', 'pro')
+            model_icon = "💎" if model_key == 'pro' else "⚡"
+
             result_data, used_model = await edit_image(photos_bytes, prompt, user_id, model_key)
             await delete_safe(thinking_msg)
 
-            # Сохраняем данные для перегенерации
-            context.user_data['last_edit_data'] = {
-                'photos': photos_bytes,
-                'prompt': prompt,
-            }
-
-            # Кнопки перегенерации и изменения промта
-            edit_regen_keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_edit_regen"),
-                    InlineKeyboardButton("✏️ Изменить промт", callback_data="img_edit_new_prompt")
-                ]
-            ])
-
-            # Сначала текст с моделью и кнопкой
+            # Сначала текстовое сообщение с информацией
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"Модель: {used_model.capitalize()}{model_icon}",
-                reply_markup=edit_regen_keyboard,
+                text=f"{model_icon} Отредактировано {photos_count} фото через <b>{IMAGE_MODELS[used_model]}</b>\n\n✏️ Запрос: {prompt}",
+                parse_mode='HTML',
                 reply_to_message_id=message_id
             )
 
@@ -2092,7 +2056,7 @@ async def _process_photo_edit_prompt(
     Обрабатывает ввод промта для редактирования фото (mode='awaiting_edit_prompt').
     Возвращает True если обработано.
     """
-    if context.user_data.get('mode') not in ['awaiting_edit_prompt', 'awaiting_new_edit_prompt']:
+    if context.user_data.get('mode') != 'awaiting_edit_prompt':
         return False
 
     if 'photo_task' not in context.user_data:
@@ -2107,38 +2071,28 @@ async def _process_photo_edit_prompt(
     photos_count = len(photos_bytes)
     orig_msg_id = photo_task['message_id']
 
-    model_key = context.user_data.get('image_model', 'pro')
-    model_icon = "💎" if model_key == 'pro' else "⚡"
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
     thinking_msg = await update.message.reply_text(
-        f"🎨 {model_icon} Генерирую изображение...",
+        f"🎨 Редактирую {photos_count} изображения..." if photos_count > 1 else "🎨 Редактирую изображение...",
         reply_to_message_id=update.message.message_id
     )
 
     try:
+        model_key = context.user_data.get('image_model', 'pro')
+        model_icon = "💎" if model_key == 'pro' else "⚡"
 
         result_data, used_model = await edit_image(photos_bytes, prompt, user_id, model_key)
         await thinking_msg.delete()
 
-        # Сохраняем данные для перегенерации (повторное редактирование)
-        context.user_data['last_edit_data'] = {
-            'photos': photos_bytes,
-            'prompt': prompt,
-        }
+        # Формируем caption
+        if photos_count > 1:
+            caption = f"{model_icon} Отредактировано {photos_count} фото через <b>{IMAGE_MODELS[used_model]}</b>\n\n✏️ Запрос: {prompt}"
+        else:
+            caption = f"{model_icon} Отредактировано через <b>{IMAGE_MODELS[used_model]}</b>\n\n✏️ Запрос: {prompt}"
 
-        # Кнопки перегенерации и изменения промта
-        edit_regen_keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_edit_regen"),
-                InlineKeyboardButton("✏️ Изменить промт", callback_data="img_edit_new_prompt")
-            ]
-        ])
-
-        # Сначала текст с моделью и кнопкой
         await update.message.reply_text(
-            f"Модель: {used_model.capitalize()}{model_icon}",
-            reply_markup=edit_regen_keyboard,
+            caption,
+            parse_mode='HTML',
             reply_to_message_id=orig_msg_id
         )
         await update.message.reply_photo(photo=result_data)
@@ -2676,30 +2630,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 5. ДИСПЕТЧЕР — делегирование helper-функциям
 
-    # --- Обработка режимов ожидания промта после кнопок ---
-    
-    # Новый промт для РЕДАКТИРОВАНИЯ (кнопка «✏️ Изменить промт»)
-    if context.user_data.get('mode') == 'awaiting_new_edit_prompt':
-        data = context.user_data.get('last_edit_data')
-        if not data:
-            context.user_data.pop('mode', None)
-            return await update.message.reply_text("Данные для редактирования не найдены. Отправьте фото заново.")
-        
-        # Подменяем photo_task данными из памяти
-        context.user_data['photo_task'] = {
-            'photos': data['photos'],
-            'message_id': update.message.message_id,
-            'timestamp': time.time()
-        }
-        # Вызываем функцию (режим НЕ удаляем здесь, он удалится внутри функции на успехе)
-        return await _process_photo_edit_prompt(update, context, user_id)
-
-    # Новый промт для генерации (кнопка «✏️ Изменить промт»)
-    if context.user_data.get('mode') == 'awaiting_new_image_prompt':
-        context.user_data.pop('mode', None)
-        return await _process_image_gen_mode(update, context, text, user_id)
-
-    # Стандартное редактирование фото по кнопке (mode='awaiting_edit_prompt')
+    # Редактирование фото по кнопке (mode='awaiting_edit_prompt')
     if await _process_photo_edit_prompt(update, context, user_id):
         return
 
@@ -2831,31 +2762,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _parse_inline_command(text: str) -> tuple[str, str]:
     """
-    Парсит inline-запрос и определяет команду по префиксу.
+    Парсит inline-запрос и определяет команду по первому слову.
+    Поддерживает разделители: пробел, Enter (новая строка).
     Возвращает (command_type, argument).
     """
-    lower = text.lower()
+    parts = text.split(None, 1)
+    if not parts:
+        return ('gemini', text)
 
-    # Перевод: пр <текст> / перевод <текст>
-    if lower.startswith('пр ') or lower == 'пр':
-        return ('translate', text[3:].strip())
-    if lower.startswith('перевод ') or lower == 'перевод':
-        return ('translate', text[8:].strip())
+    cmd_word = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
 
-    # YouTube саммари: ю <ссылка> / ютуб <ссылка>
-    if lower.startswith('ю ') or lower == 'ю':
-        return ('youtube', text[2:].strip())
-    if lower.startswith('ютуб ') or lower == 'ютуб':
-        return ('youtube', text[5:].strip())
+    # Перевод: пр / перевод
+    if cmd_word in ('пр', 'перевод'):
+        return ('translate', arg)
 
-    # YouTube превью: превью <ссылка> / пре <ссылка>
-    if lower.startswith('превью ') or lower == 'превью':
-        return ('preview', text[7:].strip())
-    if lower.startswith('пре ') or lower == 'пре':
-        return ('preview', text[4:].strip())
+    # YouTube саммари: ю / ютуб
+    if cmd_word in ('ю', 'ютуб'):
+        return ('youtube', arg)
+
+    # YouTube превью: пре / превью
+    if cmd_word in ('пре', 'превью'):
+        return ('preview', arg)
 
     # Всё остальное — Gemini
     return ('gemini', text)
+
 
 
 async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2985,7 +2917,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(results, cache_time=0)
         return
 
-    # --- YOUTUBE ПРЕВЬЮ (placeholder → фетч в handle_chosen_inline_result) ---
+    # --- YOUTUBE ПРЕВЬЮ ---
     if cmd_type == 'preview':
         if not cmd_arg:
             results = [
@@ -3002,17 +2934,17 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer(results, cache_time=30)
             return
 
+        # Для превью используем гибридную заглушку:
+        # thumbnail_url (в списке) = аватарка бота
+        # photo_url (в чате) = черный квадрат
         results = [
-            InlineQueryResultArticle(
+            InlineQueryResultPhoto(
                 id=str(uuid.uuid4()),
-                title="🖼️ YouTube Превью",
-                description=cmd_arg[:100],
-                input_message_content=InputTextMessageContent(
-                    message_text="🖼️ Загружаю превью...",
-                    parse_mode='HTML'
-                ),
-                reply_markup=loading_keyboard,
-                thumbnail_url=avatar_url
+                photo_url=BLACK_SQUARE_URL,
+                thumbnail_url=avatar_url,
+                title=f"✅ YouTube: {cmd_arg[:40]}...",
+                caption="⏳ Формирую превью...",
+                reply_markup=loading_keyboard
             )
         ]
         await query.answer(results, cache_time=0)
@@ -3102,16 +3034,24 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
         if cmd_type == 'preview' and cmd_arg:
             preview = await asyncio.to_thread(get_youtube_preview, cmd_arg)
             if preview['success']:
-                await context.bot.edit_message_text(
+                thumb_url = preview['thumbnail_url']
+                title = preview['title']
+                
+                # Заменяем фото-заглушку на реальное превью видео
+                await context.bot.edit_message_media(
                     inline_message_id=inline_message_id,
-                    text=f"🎬 <b>{escape_html(preview['title'])}</b>\n{preview['original_url']}",
-                    parse_mode='HTML',
+                    media=InputMediaPhoto(
+                        media=thumb_url,
+                        caption=f'🎬 <b>{escape_html(title)}</b>\n{preview["original_url"]}',
+                        parse_mode='HTML'
+                    ),
                     reply_markup=InlineKeyboardMarkup([])
                 )
             else:
-                await context.bot.edit_message_text(
+                # Если ошибка, меняем подпись у заглушки
+                await context.bot.edit_message_caption(
                     inline_message_id=inline_message_id,
-                    text=f"❌ {preview['error']}",
+                    caption=f"❌ {preview['error']}",
                     reply_markup=InlineKeyboardMarkup([])
                 )
             log_activity(user.id, user.username, "inline_preview", cmd_arg[:30])
@@ -3124,7 +3064,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
                     model=MODELS['flash'],
                     contents=text,
                     config=genai_types.GenerateContentConfig(
-                        system_instruction="Отвечай кратко, но информативно. Используй интернет, если чего то не знаешь.",
+                        system_instruction="Отвечай кратко, но если тема обширная — выдели главное, опусти второстепенное. Используй интернет для поиска актуальной информации.",
                         tools=SEARCH_TOOLS
                     )
                 )
@@ -3170,7 +3110,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия на кнопки под фото/альбом и перегенерацию"""
+    """Обрабатывает нажатия на кнопки под фото/альбом"""
     query = update.callback_query
     user_id = query.from_user.id
 
@@ -3183,130 +3123,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not check_access(user_id):
         await query.answer("⛔️ Нет доступа.", show_alert=False)
-        return
-
-    # --- Перегенерация изображения ---
-    if query.data == "img_regen":
-        prompt = context.user_data.get('last_image_prompt')
-        if not prompt:
-            await query.answer("Промт не найден. Отправьте запрос заново.", show_alert=True)
-            return
-
-        model_key = context.user_data.get('image_model', 'pro')
-        model_icon = "💎" if model_key == 'pro' else "⚡"
-
-        # Убираем кнопку со старого текста, показываем статус генерации
-        try:
-            await query.edit_message_text(
-                text=f"🔄 Перегенерирую {model_icon}..."
-            )
-        except Exception:
-            pass
-
-        try:
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-            result_data, used_model = await generate_image(prompt, context)
-
-            # Кнопки перегенерации и изменения промта
-            regen_keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_regen"),
-                    InlineKeyboardButton("✏️ Изменить промт", callback_data="img_new_prompt")
-                ]
-            ])
-
-            # Текст с моделью и кнопкой
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"Модель: {used_model.capitalize()}{model_icon}",
-                reply_markup=regen_keyboard
-            )
-
-            # Фото отдельно
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=result_data
-            )
-
-            log_activity(user_id, query.from_user.username, "img_regen", prompt[:30])
-
-        except Exception as e:
-            log_error("IMG_REGEN", str(e), user_id)
-            error_msg = format_gemini_error(e, "IMG_REGEN")
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=error_msg,
-                parse_mode='HTML'
-            )
-        return
-
-    # --- Изменение промта для генерации ---
-    if query.data == "img_new_prompt":
-        context.user_data['mode'] = 'awaiting_new_image_prompt'
-        await query.edit_message_text("✏️ Введите новый промт для генерации изображения:")
-        return
-
-    # --- Перегенерация РЕДАКТИРОВАНИЯ ---
-    if query.data == "img_edit_regen":
-        data = context.user_data.get('last_edit_data')
-        if not data:
-            await query.answer("Данные для редактирования не найдены. Отправьте фото заново.", show_alert=True)
-            return
-
-        photos_bytes = data['photos']
-        prompt = data['prompt']
-        model_key = context.user_data.get('image_model', 'pro')
-        model_icon = "💎" if model_key == 'pro' else "⚡"
-
-        # Убираем кнопку со старого текста, показываем статус
-        try:
-            await query.edit_message_text(
-                text=f"🔄 Перегенерирую редактирование {model_icon}..."
-            )
-        except Exception:
-            pass
-
-        try:
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-            result_data, used_model = await edit_image(photos_bytes, prompt, user_id, model_key)
-
-            # Кнопки перегенерации и изменения промта
-            edit_regen_keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("🔄 Перегенерировать", callback_data="img_edit_regen"),
-                    InlineKeyboardButton("✏️ Изменить промт", callback_data="img_edit_new_prompt")
-                ]
-            ])
-
-            # Текст с моделью и кнопкой
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=f"Модель: {used_model.capitalize()}{model_icon}",
-                reply_markup=edit_regen_keyboard
-            )
-
-            # Фото отдельно
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=result_data
-            )
-
-            log_activity(user_id, query.from_user.username, "img_edit_regen", prompt[:30])
-
-        except Exception as e:
-            log_error("IMG_EDIT_REGEN", str(e), user_id)
-            error_msg = format_gemini_error(e, "IMG_EDIT_REGEN")
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text=error_msg,
-                parse_mode='HTML'
-            )
-        return
-
-    # --- Изменение промта для РЕДАКТИРОВАНИЯ ---
-    if query.data == "img_edit_new_prompt":
-        context.user_data['mode'] = 'awaiting_new_edit_prompt'
-        await query.edit_message_text("✏️ Введите новый промт для редактирования исходного изображения:")
         return
 
     if 'photo_task' not in context.user_data:
@@ -3455,8 +3271,8 @@ if __name__ == '__main__':
     # Команды
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('help', help_command))
-    application.add_handler(CommandHandler('youtube', youtube_command))
     application.add_handler(CommandHandler('status', status_command))
+    application.add_handler(CommandHandler('youtube', youtube_command))
 
     application.add_handler(CommandHandler('add', add_user))
     application.add_handler(CommandHandler('del', del_user))
