@@ -10,6 +10,13 @@ import uuid
 import platform
 import psutil
 import requests
+import sys
+import io
+
+# Принудительная установка UTF-8 для Windows консоли
+if platform.system() == 'Windows':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -25,7 +32,7 @@ from telegram import (
 )
 from telegram.constants import ChatType
 from telegram.ext import (
-    ApplicationBuilder, ContextTypes, CommandHandler, 
+    Application, ApplicationBuilder, ContextTypes, CommandHandler, 
     MessageHandler, CallbackQueryHandler, InlineQueryHandler, 
     ChosenInlineResultHandler, filters
 )
@@ -86,6 +93,9 @@ SYSTEM_INSTRUCTION_PRO = """Ты — интеллектуальный помощ
 # Файл с доступами
 USERS_FILE = os.path.join(BASE_DIR, 'allowed_users.json')
 
+# Файл с пользовательскими настройками
+USER_SETTINGS_FILE = os.path.join(BASE_DIR, 'user_settings.json')
+
 # Клиент нового SDK (для чатов с google_search и генерации изображений)
 gemini_client = genai_client.Client(api_key=GEMINI_API_KEY)
 
@@ -98,7 +108,7 @@ SEARCH_TOOLS = [
 # Модели для генераций изображений (Nano Banana)
 IMAGE_MODELS = {
     'pro': 'gemini-3-pro-image-preview',  # Nano Banana Pro (thinking mode)
-    'flash': 'gemini-2.5-flash-image'     # Nano Banana Flash (1024px, быстрый)
+    'flash': 'gemini-3.1-flash-image-preview'     # Nano Banana Flash (1024px, быстрый)
 }
 
 # Ссылки для инлайн-заглушек
@@ -191,7 +201,8 @@ def cleanup_log_files() -> None:
 def get_latest_models() -> dict[str, str]:
     """Возвращает актуальные версии моделей Gemini."""
     required_pro = 'gemini-3.1-pro-preview'
-    required_flash = 'gemini-3-flash-preview'  # Фиксируем версию модели
+    required_flash = 'gemini-3-flash-preview'
+    required_lite = 'gemini-3.1-flash-lite-preview'
 
     try:
         # Получаем список доступных моделей
@@ -200,12 +211,17 @@ def get_latest_models() -> dict[str, str]:
 
         # Проверяем доступность требуемых моделей
         if required_pro not in available_names:
-            raise RuntimeError(f"❌ Модель {required_pro} недоступна в API! Доступные: {', '.join(available_names[:5])}")
+            raise RuntimeError(f"❌ Модель {required_pro} недоступна в API!")
 
         if required_flash not in available_names:
-            raise RuntimeError(f"❌ Модель {required_flash} недоступна в API! Доступные: {', '.join(available_names[:5])}")
+            raise RuntimeError(f"❌ Модель {required_flash} недоступна в API!")
 
-        return {'pro': required_pro, 'flash': required_flash}
+        if required_lite not in available_names:
+            # Если лайт недоступна, используем обычный флеш как фоллбек
+            logger.warning(f"⚠️ Модель {required_lite} недоступна, используем {required_flash} для перевода.")
+            required_lite = required_flash
+
+        return {'pro': required_pro, 'flash': required_flash, 'lite': required_lite}
 
     except Exception as e:
         logger.error(f"Ошибка при проверке моделей: {e}")
@@ -220,13 +236,14 @@ def initialize_models() -> None:
     """Инициализирует глобальную переменную MODELS"""
     try:
         MODELS.update(get_latest_models())
-        logger.debug(f"✅ Модели: Pro={MODELS['pro']}, Flash={MODELS['flash']}")
+        logger.debug(f"✅ Модели: Pro={MODELS['pro']}, Flash={MODELS['flash']}, Lite={MODELS['lite']}")
     except Exception as e:
         logger.error(f"Critical Error: {e}")
-        # Фоллбек для запуска без сети (генерации могут не работать)
+        # Фоллбек для запуска без сети
         MODELS.update({
             'pro': 'gemini-3.1-pro-preview',
-            'flash': 'gemini-flash-latest'
+            'flash': 'gemini-3-flash-preview',
+            'lite': 'gemini-3.1-flash-lite-preview'
         })
         print(f"Работаем с дефолтными моделями (Offline mode): {MODELS}")
 
@@ -235,6 +252,9 @@ def initialize_models() -> None:
 
 
 allowed_users = set()
+
+# Глобальные настройки пользователей (например, выбор image_model)
+user_settings = {}
 
 # Хранилище для сбора альбомов (media_group)
 pending_albums = {}
@@ -398,6 +418,25 @@ def save_users() -> None:
         logger.warning(f"Ошибка сохранения пользователей: {e}")
 
 
+def load_user_settings() -> None:
+    global user_settings
+    if os.path.exists(USER_SETTINGS_FILE):
+        try:
+            with open(USER_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                user_settings = json.load(f)
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки {USER_SETTINGS_FILE}: {e}")
+            user_settings = {}
+
+
+def save_user_settings() -> None:
+    try:
+        with open(USER_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_settings, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Ошибка сохранения настроек пользователей: {e}")
+
+
 def check_access(user_id: int) -> bool:
     return user_id == ADMIN_ID or user_id in allowed_users
 
@@ -405,6 +444,19 @@ def check_access(user_id: int) -> bool:
 def get_bot_avatar_url() -> str:
     """URL аватарки бота для inline-результатов"""
     return BOT_AVATAR_URL
+
+
+def get_user_image_model(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Получает и кэширует в context предпочтительную модель изображений пользователя (pro/flash)"""
+    val = context.user_data.get('image_model')
+    if not val:
+        uid_str = str(user_id)
+        if uid_str in user_settings and 'image_model' in user_settings[uid_str]:
+            val = user_settings[uid_str]['image_model']
+        else:
+            val = 'pro' # По умолчанию pro
+        context.user_data['image_model'] = val
+    return val
 
 
 def get_model_key(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -473,6 +525,14 @@ def format_gemini_error(error: Exception, context_info: str = "") -> str:
     error_safe = escape_html(error_full)
     prefix = f"[{context_info}] " if context_info else ""
 
+    # Ошибка сервиса (503 / 500) - высокая нагрузка или сбой
+    if '503' in error_str or '500' in error_str or 'unavailable' in error_str or 'high demand' in error_str:
+        return (
+            f"⏳ <b>Google сейчас перегружен</b> (высокая нагрузка).\n"
+            f"Пожалуйста, подожди 30-60 секунд и попробуй снова.\n"
+            f"<code>[Error 503: High Demand]</code>"
+        )
+
     # Квота / Rate Limit
     if 'quota' in error_str or 'rate limit' in error_str or '429' in error_str:
         return f"🚦 {prefix}[QUOTA] Превышен лимит запросов. Попробуй позже.\n<code>{error_safe[:120]}</code>"
@@ -485,9 +545,9 @@ def format_gemini_error(error: Exception, context_info: str = "") -> str:
     if 'api key' in error_str or 'invalid' in error_str or '401' in error_str or '403' in error_str:
         return f"🔑 {prefix}[AUTH] Проблема с API ключом.\n<code>{error_safe[:150]}</code>"
 
-    # Модель недоступна
-    if 'model' in error_str and ('not found' in error_str or 'unavailable' in error_str or 'does not exist' in error_str):
-        return f"🤖 {prefix}[MODEL] Модель недоступна.\n<code>{error_safe[:120]}</code>"
+    # Модель недоступна (условие после 503, так как 503 часто содержит слово unavailable)
+    if 'model' in error_str and ('not found' in error_str or 'does not exist' in error_str):
+        return f"🤖 {prefix}[MODEL] Модель не найдена или не поддерживается.\n<code>{error_safe[:120]}</code>"
 
     # Слишком длинный запрос
     if 'token' in error_str and ('limit' in error_str or 'exceed' in error_str or 'too long' in error_str):
@@ -497,9 +557,9 @@ def format_gemini_error(error: Exception, context_info: str = "") -> str:
     if 'connection' in error_str or 'timeout' in error_str or 'network' in error_str:
         return f"🌐 {prefix}[NETWORK] Ошибка сети.\n<code>{error_safe[:100]}</code>"
 
-    # Ошибка сервера Google
-    if '500' in error_str or '503' in error_str or 'internal' in error_str or 'server' in error_str:
-        return f"💥 {prefix}[SERVER] Ошибка сервера Google.\n<code>{error_safe[:100]}</code>"
+    # Неизвестная ошибка сервера Google
+    if 'internal' in error_str or 'server' in error_str:
+        return f"💥 {prefix}[SERVER] Внутренняя ошибка сервера Google.\n<code>{error_safe[:100]}</code>"
 
     # Неподдерживаемый формат
     if 'unsupported' in error_str or 'invalid format' in error_str or 'mime' in error_str:
@@ -853,12 +913,12 @@ async def send_with_retry(chat, text: str, retries: int = MAX_RETRIES):
 # --- ФУНКЦИИ ГЕНЕРАЦИИ ИЗОБРАЖЕНИЙ ---
 
 
-async def generate_image(prompt: str, context) -> tuple[bytes, str]:
+async def generate_image(prompt: str, context, user_id: int) -> tuple[bytes, str]:
     """
     Генерирует изображение по промту через Gemini.
     Источник: https://ai.google.dev/gemini-api/docs/image-generation
     """
-    model_key = context.user_data.get('image_model', 'pro')  # По умолчанию pro
+    model_key = get_user_image_model(user_id, context)
     model_name = IMAGE_MODELS[model_key]
 
     try:
@@ -926,7 +986,7 @@ async def edit_image(images_bytes: list[bytes], prompt: str, user_id: int, model
 async def handle_image_generation(update: Update, context, prompt: str, user_id: int):
     """Общая функция генерации изображения (устраняет дублирование)"""
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-    model_key = context.user_data.get('image_model', 'pro')
+    model_key = get_user_image_model(user_id, context)
     model_icon = "💎" if model_key == 'pro' else "⚡"
     thinking_msg = await update.message.reply_text(
         f"🎨 {model_icon} Генерирую изображение...",
@@ -934,7 +994,7 @@ async def handle_image_generation(update: Update, context, prompt: str, user_id:
     )
 
     try:
-        result_data, used_model = await generate_image(prompt, context)
+        result_data, used_model = await generate_image(prompt, context, user_id)
         await thinking_msg.delete()
 
         # Сначала текст с названием модели
@@ -944,9 +1004,18 @@ async def handle_image_generation(update: Update, context, prompt: str, user_id:
             reply_to_message_id=update.message.message_id
         )
 
-        # Потом сама картинка
+        # Сохраняем промпт для возможной перегенерации
+        context.user_data['last_image_prompt'] = prompt
+
+        # Кнопка перегенерации под картинкой
+        regen_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Ещё", callback_data="img_regen")]
+        ])
+
+        # Потом сама картинка с кнопкой
         await update.message.reply_photo(
             photo=result_data,
+            reply_markup=regen_keyboard,
             reply_to_message_id=update.message.message_id
         )
 
@@ -1370,7 +1439,12 @@ async def set_pro_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("⛔️ Нет доступа.")
     context.user_data['model'] = 'pro'
     reset_session(context)
-    await update.message.reply_text(f"💎 Модель: <b>Gemini Pro</b>\n{MODELS['pro']}", parse_mode='HTML')
+    await update.message.reply_text(
+        f"💎 Модель: <b>Gemini Pro</b>\n"
+        f"\n"
+        f"{MODELS['pro']}",
+        parse_mode='HTML'
+    )
 
 
 async def set_flash_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1379,7 +1453,12 @@ async def set_flash_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("⛔️ Нет доступа.")
     context.user_data['model'] = 'flash'
     reset_session(context)
-    await update.message.reply_text(f"⚡ Модель: <b>Gemini Flash</b>\n{MODELS['flash']}", parse_mode='HTML')
+    await update.message.reply_text(
+        f"⚡ Модель: <b>Gemini Flash</b>\n"
+        f"\n"
+        f"{MODELS['flash']}",
+        parse_mode='HTML'
+    )
 
 
 async def youtube_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1403,13 +1482,19 @@ async def set_image_pro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not check_access(user_id):
         return await update.message.reply_text("⛔️ Нет доступа.")
+    uid_str = str(user_id)
+    if uid_str not in user_settings:
+        user_settings[uid_str] = {}
+    user_settings[uid_str]['image_model'] = 'pro'
+    save_user_settings()
+    
     context.user_data['image_model'] = 'pro'
-    context.user_data['mode'] = 'image_gen'  # Сразу ждём промпт
+    context.user_data.pop('mode', None)
     await update.message.reply_text(
-        f"🎨 💎 <b>Pro</b>\n{IMAGE_MODELS['pro']}\n\n✏️ Опишите что нарисовать:",
+        f"🎨 Глобальная модель для изображения:\n💎 <b>Pro</b> {IMAGE_MODELS['pro']}",
         parse_mode='HTML'
     )
-    log_activity(user_id, update.effective_user.username, 'image_pro_mode', 'активирован')
+    log_activity(user_id, update.effective_user.username, 'image_pro_mode', 'установлена глобально')
 
 
 async def set_image_flash(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1417,13 +1502,19 @@ async def set_image_flash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not check_access(user_id):
         return await update.message.reply_text("⛔️ Нет доступа.")
+    uid_str = str(user_id)
+    if uid_str not in user_settings:
+        user_settings[uid_str] = {}
+    user_settings[uid_str]['image_model'] = 'flash'
+    save_user_settings()
+
     context.user_data['image_model'] = 'flash'
-    context.user_data['mode'] = 'image_gen'  # Сразу ждём промпт
+    context.user_data.pop('mode', None)
     await update.message.reply_text(
-        f"🎨 ⚡ <b>Flash</b>\n{IMAGE_MODELS['flash']}\n\n✏️ Опишите что нарисовать:",
+        f"🎨 Глобальная модель для изображения:\n⚡ <b>Flash</b> {IMAGE_MODELS['flash']}",
         parse_mode='HTML'
     )
-    log_activity(user_id, update.effective_user.username, 'image_flash_mode', 'активирован')
+    log_activity(user_id, update.effective_user.username, 'image_flash_mode', 'установлена глобально')
 
 # --- ПОМОЩЬ ---
 
@@ -1683,7 +1774,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             context.user_data['mode'] = 'awaiting_edit_prompt'
 
-            model_key = context.user_data.get('image_model', 'pro')
+            model_key = get_user_image_model(user_id, context)
             model_icon = "💎" if model_key == 'pro' else "⚡"
 
             await update.message.reply_text(
@@ -1762,7 +1853,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             context.user_data['mode'] = 'awaiting_edit_prompt'
 
-            model_key = context.user_data.get('image_model', 'pro')
+            model_key = get_user_image_model(user_id, context)
             model_icon = "💎" if model_key == 'pro' else "⚡"
 
             return await update.message.reply_text(
@@ -1783,12 +1874,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         photo_bytes = await photo_file.download_as_bytearray()
 
         # Получаем модель для изображений
-        model_key = context.user_data.get('image_model', 'pro')
+        model_key = get_user_image_model(user_id, context)
         model_icon = "💎" if model_key == 'pro' else "⚡"
 
         # Редактируем
         result_data, used_model = await edit_image([bytes(photo_bytes)], prompt, user_id, model_key)
         await thinking_msg.delete()
+
+        # Сохраняем данные для перегенерации
+        context.user_data['last_edit_data'] = {
+            'photos': [bytes(photo_bytes)],
+            'prompt': prompt,
+            'model_key': model_key
+        }
 
         # Сначала текстовое сообщение с информацией
         await update.message.reply_text(
@@ -1797,8 +1895,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_to_message_id=update.message.message_id
         )
 
-        # Потом фото отдельно
-        await update.message.reply_photo(photo=result_data)
+        # Кнопка перегенерации редактирования
+        regen_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Ещё", callback_data="img_edit_regen")]
+        ])
+
+        # Потом фото с кнопкой
+        await update.message.reply_photo(photo=result_data, reply_markup=regen_keyboard)
 
         # Логируем активность
         log_activity(user_id, update.effective_user.username, "img_edit", f"{used_model}: {prompt[:20]}")
@@ -1843,7 +1946,7 @@ async def process_album_delayed(media_group_id: str, update: Update, context: Co
         }
         context.user_data['mode'] = 'awaiting_edit_prompt'
 
-        model_key = context.user_data.get('image_model', 'pro')
+        model_key = get_user_image_model(user_id, context)
         model_icon = "💎" if model_key == 'pro' else "⚡"
 
         await context.bot.send_message(
@@ -1873,7 +1976,7 @@ async def process_album_delayed(media_group_id: str, update: Update, context: Co
             }
             context.user_data['mode'] = 'awaiting_edit_prompt'
 
-            model_key = context.user_data.get('image_model', 'pro')
+            model_key = get_user_image_model(user_id, context)
             model_icon = "💎" if model_key == 'pro' else "⚡"
 
             await context.bot.send_message(
@@ -1893,7 +1996,7 @@ async def process_album_delayed(media_group_id: str, update: Update, context: Co
 
         try:
             # Получаем модель для изображений
-            model_key = context.user_data.get('image_model', 'pro')
+            model_key = get_user_image_model(user_id, context)
             model_icon = "💎" if model_key == 'pro' else "⚡"
 
             result_data, used_model = await edit_image(photos_bytes, prompt, user_id, model_key)
@@ -2084,6 +2187,13 @@ async def _process_photo_edit_prompt(
         result_data, used_model = await edit_image(photos_bytes, prompt, user_id, model_key)
         await thinking_msg.delete()
 
+        # Сохраняем данные для перегенерации
+        context.user_data['last_edit_data'] = {
+            'photos': photos_bytes,
+            'prompt': prompt,
+            'model_key': model_key
+        }
+
         # Формируем caption
         if photos_count > 1:
             caption = f"{model_icon} Отредактировано {photos_count} фото через <b>{IMAGE_MODELS[used_model]}</b>\n\n✏️ Запрос: {prompt}"
@@ -2095,7 +2205,13 @@ async def _process_photo_edit_prompt(
             parse_mode='HTML',
             reply_to_message_id=orig_msg_id
         )
-        await update.message.reply_photo(photo=result_data)
+
+        # Кнопка перегенерации редактирования
+        regen_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Ещё", callback_data="img_edit_regen")]
+        ])
+
+        await update.message.reply_photo(photo=result_data, reply_markup=regen_keyboard)
 
         log_activity(user_id, update.effective_user.username, "img_edit_btn_done", f"{used_model}, {photos_count} photos: {prompt[:15]}")
         context.user_data.pop('mode', None)
@@ -2258,7 +2374,7 @@ async def _process_fast_commands(
                 response = await asyncio.wait_for(
                     asyncio.to_thread(
                         lambda: gemini_client.models.generate_content(
-                            model=MODELS['flash'],
+                            model=MODELS.get('lite', MODELS['flash']),
                             contents=prompt_text
                         )
                     ),
@@ -2401,7 +2517,7 @@ async def _process_fast_commands(
     # КОМАНДА "К" или "КАРТИНКА" - генерация изображений
     if lower_text in ['к', 'картинка']:
         context.user_data['mode'] = 'image_gen'
-        model_key = context.user_data.get('image_model', 'pro')
+        model_key = get_user_image_model(user_id, context)
         model_icon = "💎" if model_key == 'pro' else "⚡"
         await update.message.reply_text(
             f"🎨 {model_icon} Опишите что нарисовать:",
@@ -2411,20 +2527,32 @@ async def _process_fast_commands(
 
     # Переключение модели картинок через "к про" или "к флеш"
     if lower_text in ['к про', 'к pro']:
+        uid_str = str(user_id)
+        if uid_str not in user_settings:
+            user_settings[uid_str] = {}
+        user_settings[uid_str]['image_model'] = 'pro'
+        save_user_settings()
+
         context.user_data['image_model'] = 'pro'
-        context.user_data['mode'] = 'image_gen'
+        context.user_data.pop('mode', None)
         await update.message.reply_text(
-            f"🎨 💎 Pro\n{IMAGE_MODELS['pro']}\n\n✏️ Опишите что нарисовать:",
+            f"🎨 Глобальная модель для изображения:\n💎 <b>Pro</b> {IMAGE_MODELS['pro']}",
             parse_mode='HTML',
             reply_to_message_id=update.message.message_id
         )
         return True
 
     if lower_text in ['к флеш', 'к flash']:
+        uid_str = str(user_id)
+        if uid_str not in user_settings:
+            user_settings[uid_str] = {}
+        user_settings[uid_str]['image_model'] = 'flash'
+        save_user_settings()
+
         context.user_data['image_model'] = 'flash'
-        context.user_data['mode'] = 'image_gen'
+        context.user_data.pop('mode', None)
         await update.message.reply_text(
-            f"🎨 ⚡ Flash\n{IMAGE_MODELS['flash']}\n\n✏️ Опишите что нарисовать:",
+            f"🎨 Глобальная модель для изображения:\n⚡ <b>Flash</b> {IMAGE_MODELS['flash']}",
             parse_mode='HTML',
             reply_to_message_id=update.message.message_id
         )
@@ -2443,7 +2571,7 @@ async def _process_fast_commands(
     # КОМАНДА "Р" или "РЕДАКТИРОВАТЬ" - режим ожидания фото для редактирования
     if lower_text in ['р', 'редактировать', 'edit']:
         context.user_data['mode'] = 'awaiting_edit_photo'
-        model_key = context.user_data.get('image_model', 'pro')
+        model_key = get_user_image_model(user_id, context)
         model_icon = "💎" if model_key == 'pro' else "⚡"
         await update.message.reply_text(
             f"✏️ {model_icon} Отправьте фото (или альбом) для редактирования:",
@@ -2525,7 +2653,7 @@ async def _process_translation_mode(
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: gemini_client.models.generate_content(
-                    model=MODELS['flash'],
+                    model=MODELS.get('lite', MODELS['flash']),
                     contents=prompt_text
                 )
             ),
@@ -3110,35 +3238,43 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатия на кнопки под фото/альбом"""
+    """Обрабатывает нажатия на кнопки под фото/альбом и перегенерацию картинок"""
     query = update.callback_query
     user_id = query.from_user.id
-
-    # Всегда отвечаем на callback, чтобы убрать часы ожидания на кнопке
-    await query.answer()
+    action = query.data
 
     # Кнопка-заглушка из инлайн-режима — просто игнорируем
-    if query.data == "inline_loading":
+    if action == "inline_loading":
+        await query.answer()
         return
 
     if not check_access(user_id):
         await query.answer("⛔️ Нет доступа.", show_alert=False)
         return
 
-    if 'photo_task' not in context.user_data:
-        return await query.edit_message_text("Данные фото устарели или отсутствуют. Отправьте фото заново.")
+    # Кнопки перегенерации — им не нужен photo_task, обрабатываем отдельно
+    if action in ("img_regen", "img_edit_regen"):
+        # Ответ на callback будет внутри обработчиков ниже
+        pass
+    else:
+        # Все остальные кнопки (photo_analyze, photo_edit и т.д.) требуют photo_task
+        await query.answer()
 
-    # Проверяем таймаут (2 минуты = 120 секунд)
-    photo_data = context.user_data['photo_task']
-    elapsed_time = time.time() - photo_data.get('timestamp', 0)
+        if 'photo_task' not in context.user_data:
+            return await query.edit_message_text("Данные фото устарели или отсутствуют. Отправьте фото заново.")
 
-    if elapsed_time > PHOTO_BUTTON_TIMEOUT:
-        # Данные устарели — удаляем и сообщаем
-        context.user_data.pop('photo_task', None)
-        return await query.edit_message_text(f"⏱ Время ожидания истекло ({PHOTO_BUTTON_TIMEOUT // 60} мин). Отправьте фото заново.")
+        # Проверяем таймаут (3 минуты)
+        photo_data = context.user_data['photo_task']
+        elapsed_time = time.time() - photo_data.get('timestamp', 0)
 
-    action = query.data
-    photos_bytes = photo_data['photos']
+        if elapsed_time > PHOTO_BUTTON_TIMEOUT:
+            # Данные устарели — удаляем и сообщаем
+            context.user_data.pop('photo_task', None)
+            return await query.edit_message_text(f"⏱ Время ожидания истекло ({PHOTO_BUTTON_TIMEOUT // 60} мин). Отправьте фото заново.")
+
+    # Подготавливаем данные для фото-кнопок (если есть)
+    photo_data = context.user_data.get('photo_task', {})
+    photos_bytes = photo_data.get('photos', [])
     photos_count = len(photos_bytes)
 
     if action == "photo_analyze":
@@ -3204,6 +3340,79 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📝 Жду описания"
         )
 
+    elif action == "img_regen":
+        # Перегенерация картинки по сохранённому промпту
+        last_prompt = context.user_data.get('last_image_prompt')
+        if not last_prompt:
+            return await query.answer("Промпт не найден. Сгенерируйте картинку заново.", show_alert=True)
+
+        await query.answer("🔄 Перегенерирую...")
+        model_key = get_user_image_model(user_id, context)
+        model_icon = "💎" if model_key == 'pro' else "⚡"
+
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+            result_data, used_model = await generate_image(last_prompt, context, user_id)
+
+            # Кнопка перегенерации под новой картинкой
+            regen_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Ещё", callback_data="img_regen")]
+            ])
+
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=result_data,
+                reply_markup=regen_keyboard
+            )
+            log_activity(user_id, query.from_user.username, "img_regen", last_prompt[:30])
+
+        except Exception as e:
+            log_error("IMG_REGEN", str(e), user_id)
+            error_msg = format_gemini_error(e, "IMG_REGEN")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=error_msg,
+                parse_mode='HTML'
+            )
+
+    elif action == "img_edit_regen":
+        # Перегенерация редактирования по сохранённым данным
+        last_edit = context.user_data.get('last_edit_data')
+        if not last_edit:
+            return await query.answer("Данные редактирования не найдены. Отправьте фото заново.", show_alert=True)
+
+        await query.answer("🔄 Перегенерирую...")
+
+        try:
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+            result_data, used_model = await edit_image(
+                last_edit['photos'],
+                last_edit['prompt'],
+                user_id,
+                last_edit.get('model_key', 'pro')
+            )
+
+            # Кнопка перегенерации под новой картинкой
+            regen_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Ещё", callback_data="img_edit_regen")]
+            ])
+
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=result_data,
+                reply_markup=regen_keyboard
+            )
+            log_activity(user_id, query.from_user.username, "img_edit_regen", last_edit['prompt'][:30])
+
+        except Exception as e:
+            log_error("IMG_EDIT_REGEN", str(e), user_id)
+            error_msg = format_gemini_error(e, "IMG_EDIT_REGEN")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=error_msg,
+                parse_mode='HTML'
+            )
+
     elif action == "photo_edit":
         # Переводим в режим ожидания промта для редактирования
         # Редактирование всегда использует gemini-3-pro-image-preview (IMAGE_MODELS['pro'])
@@ -3225,44 +3434,47 @@ if __name__ == '__main__':
     logger.info(f"Загружено {len(user_activity)} записей за сегодня")
     load_users()
     logger.info(f"Загружено {len(allowed_users)} пользователей")
+    load_user_settings()
+    logger.info(f"Загружены настройки пользователей: {len(user_settings)} шт.")
 
-    # Функция инициализации (меню)
-    async def post_init(app):
-        await app.bot.set_my_commands([
-            ("start", "🔄 Сбросить контекст"),
-            ("help", "❓ Справка"),
-            ("youtube", "📺 YouTube Саммари"),
-            ("status", "📊 Статус бота"),
-            ("1model", "💎 Text Gemini Pro"),
-            ("2model", "⚡ Text Gemini Flash"),
-            ("imagepro", "Image💎 Pro"),
-            ("imageflash", "Image⚡ Flash"),
+async def post_init(app: Application):
+    """Настройка команд меню и уведомление админа после старта"""
+    await app.bot.set_my_commands([
+        ("start", "🔄 Сбросить контекст"),
+        ("status", "📊 Статус бота"),
+        ("youtube", "📺 YouTube Саммари"),
+        ("imagepro", "🎨💎Image Pro"),
+        ("imageflash", "🎨⚡Image Flash"),
+        ("1model", "💎Text Gemini Pro"),
+        ("2model", "⚡Text Gemini Flash"),
+        ("help", "❓ Справка"),
+    ])
+    logger.info("Меню команд установлено")
 
-        ])
-        logger.info("Меню команд установлено")
+    if ADMIN_ID:
+        try:
+            now = datetime.now(KYIV_TZ)
+            start_time = now.strftime('%H:%M:%S')
+            start_date = now.strftime('%d.%m.%Y')
+            pro_model = MODELS.get('pro', '?')
+            flash_model = MODELS.get('flash', '?')
+            await app.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=(
+                    f"🟢 <b>Бот запущен!</b>\n"
+                    f"📅 {start_date}\n"
+                    f"⏰ {start_time}\n"
+                    f"💎 Pro: <code>{pro_model}</code>\n"
+                    f"⚡ Flash: <code>{flash_model}</code>"
+                ),
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление о старте: {e}")
 
-        # Уведомление админа о запуске бота
-        if ADMIN_ID:
-            try:
-                now = datetime.now(KYIV_TZ)
-                start_time = now.strftime('%H:%M:%S')
-                start_date = now.strftime('%d.%m.%Y')
-                pro_model = MODELS.get('pro', '?')
-                flash_model = MODELS.get('flash', '?')
-                await app.bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=(
-                        f"🟢 <b>Бот запущен!</b>\n"
-                        f"📅 {start_date}\n"
-                        f"⏰ {start_time}\n"
-                        f"💎 Pro: <code>{pro_model}</code>\n"
-                        f"⚡ Flash: <code>{flash_model}</code>"
-                    ),
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.warning(f"Не удалось отправить уведомление о старте: {e}")
 
+def main():
+    """Основная функция запуска бота"""
     # Инициализация моделей (безопасная, не роняет бот при старте без сети)
     initialize_models()
 
@@ -3273,14 +3485,11 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('status', status_command))
     application.add_handler(CommandHandler('youtube', youtube_command))
-
     application.add_handler(CommandHandler('add', add_user))
     application.add_handler(CommandHandler('del', del_user))
     application.add_handler(CommandHandler('1model', set_pro_model))
     application.add_handler(CommandHandler('2model', set_flash_model))
     application.add_handler(CommandHandler('id', my_id))
-
-    # Команды для изображений
     application.add_handler(CommandHandler('imagepro', set_image_pro))
     application.add_handler(CommandHandler('imageflash', set_image_flash))
 
@@ -3299,3 +3508,16 @@ if __name__ == '__main__':
     logger.info(f"🚀 BOT STARTED. Pro: {MODELS.get('pro')} | Flash: {MODELS.get('flash')}")
 
     application.run_polling(drop_pending_updates=True)
+
+
+# --- ЗАПУСК ---
+if __name__ == '__main__':
+    cleanup_log_files()
+    load_activity_log()
+    logger.info(f"Загружено {len(user_activity)} записей за сегодня")
+    load_users()
+    logger.info(f"Загружено {len(allowed_users)} пользователей")
+    load_user_settings()
+    logger.info(f"Загружены настройки пользователей: {len(user_settings)} шт.")
+    
+    main()
