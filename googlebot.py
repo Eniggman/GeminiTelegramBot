@@ -113,7 +113,8 @@ IMAGE_MODELS = {
 
 # Ссылки для инлайн-заглушек
 avatar_url = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/image.png"
-BLACK_SQUARE_URL = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/black.jpg" # Нейтральный квадрат
+# Гарантированно рабочий черный квадрат (Placehold.co)
+BLACK_SQUARE_URL = "https://placehold.co/600x400/000000/000000.png"
 
 
 # Настройка логирования с ротацией
@@ -3064,7 +3065,10 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Извлекаем video_id для YouTube-миниатюры в списке результатов
         video_id = extract_video_id(cmd_arg)
+        logger.info(f"Inline Preview: arg='{cmd_arg}', video_id='{video_id}'")
+        
         if not video_id:
+            logger.warning(f"Inline Preview: Invalid video link '{cmd_arg}'")
             results = [
                 InlineQueryResultArticle(
                     id=str(uuid.uuid4()),
@@ -3088,7 +3092,7 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
                 photo_url=BLACK_SQUARE_URL,
                 thumbnail_url=BLACK_SQUARE_URL,
                 title=f"✅ YouTube: {cmd_arg[:40]}...",
-                caption="⏳ Формирую превью...",
+                caption=f"⏳ Формирую превью...\n{cmd_arg}",
                 reply_markup=loading_keyboard
             )
         ]
@@ -3123,7 +3127,7 @@ async def handle_chosen_inline_result(update: Update, context: ContextTypes.DEFA
     inline_message_id = result.inline_message_id
     user = result.from_user
     text = (result.query or "").strip()
-
+    
     # Без текста или без inline_message_id — редактировать нечего
     if not text or not inline_message_id:
         return
