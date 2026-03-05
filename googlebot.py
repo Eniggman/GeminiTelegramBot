@@ -112,7 +112,7 @@ IMAGE_MODELS = {
 }
 
 # Ссылки для инлайн-заглушек
-avatar_url = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/logo.jpg"
+avatar_url = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/image.png"
 BLACK_SQUARE_URL = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/black.jpg" # Нейтральный квадрат
 
 
@@ -260,7 +260,7 @@ user_settings = {}
 pending_albums = {}
 
 # URL изображения бота
-BOT_AVATAR_URL = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/avatar.jpg"
+BOT_AVATAR_URL = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/image.png"
 
 # --- СТАТИСТИКА И ЛОГИ ---
 bot_stats = {
@@ -3062,14 +3062,31 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer(results, cache_time=30)
             return
 
-        # Для превью используем гибридную заглушку:
-        # thumbnail_url (в списке) = аватарка бота
-        # photo_url (в чате) = черный квадрат
+        # Извлекаем video_id для YouTube-миниатюры в списке результатов
+        video_id = extract_video_id(cmd_arg)
+        if not video_id:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid.uuid4()),
+                    title="❌ Некорректная ссылка",
+                    description="Не удалось распознать YouTube ссылку",
+                    input_message_content=InputTextMessageContent(
+                        message_text="❌ Не удалось распознать YouTube ссылку"
+                    ),
+                    thumbnail_url=avatar_url
+                )
+            ]
+            await query.answer(results, cache_time=30)
+            return
+
+        # Гибридная заглушка:
+        # thumbnail_url (в списке) = чёрный квадрат (как просил юзер)
+        # photo_url (в чате) = чёрный квадрат (placeholder, заменится на реальное превью)
         results = [
             InlineQueryResultPhoto(
                 id=str(uuid.uuid4()),
                 photo_url=BLACK_SQUARE_URL,
-                thumbnail_url=avatar_url,
+                thumbnail_url=BLACK_SQUARE_URL,
                 title=f"✅ YouTube: {cmd_arg[:40]}...",
                 caption="⏳ Формирую превью...",
                 reply_markup=loading_keyboard
