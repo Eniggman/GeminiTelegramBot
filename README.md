@@ -1,4 +1,4 @@
-﻿# 🤖 Google-Gemini Telegram Bot
+# 🤖 Google-Gemini Telegram Bot
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Gemini](https://img.shields.io/badge/Google%20AI-Gemini-8E75B2?style=for-the-badge&logo=google&logoColor=white)
@@ -179,22 +179,27 @@ Telegram бот для общения с Gemini, написанный на Pytho
 
 ### 3.1 Какой инструмент какую модель использует
 
-| Инструмент | Модель | Переключается? | Где в коде |
-| :--- | :--- | :---: | :--- |
-| 💬 **Текстовый чат** | `gemini-3.1-pro-preview` / `gemini-flash-latest` | ✅ `/1model` `/2model` | строка 137-138 |
-| 🎤 **Голосовые сообщения** | `gemini-flash-latest` (всегда Flash) | ❌ | строка 1494 |
-| 🖼️ **Анализ фото** | Зависит от `/1model` `/2model` | ✅ | — |
-| 🎨 **Генерация картинок** | `gemini-3-pro-image-preview` / `gemini-2.5-flash-image` | ✅ `/imagepro` `/imageflash` | строка 90-91 |
-| ✏️ **Редактирование фото** | `gemini-3-pro-image-preview` / `gemini-2.5-flash-image` | ✅ `/1model` `/2model` | строка 664 |
-| 📄 **Анализ документов** | Зависит от `/1model` `/2model` | ✅ | — |
-| 🌐 **Перевод текста** | `gemini-flash-latest` (всегда Flash) | ❌ | строка 2373 |
-| 🖼️ **Перевод текста на фото** | `gemini-3-pro-image-preview` / `gemini-2.5-flash-image` | ✅ `/imagepro` `/imageflash` | строка 1526 |
-| 📺 **YouTube саммари** | `gemini-flash-latest` (всегда Flash) | ❌ | строка 855 |
-| 🔍 **Инлайн-режим** | `gemini-flash-latest` + 🌐 поиск (всегда Flash) | ❌ | строка 2824 |
+| Инструмент | Модель | Переключается? |
+| :--- | :--- | :---: |
+| 💬 **Текстовый чат** | `gemini-3-flash-preview` | ✅ `/1model` `/2model` |
+| 🎤 **Голосовые сообщения** | `gemini-3-flash-preview` | ❌ |
+| 🎨 **Генерация картинок** | `gemini-3.1-flash-image-preview` | ✅ `/imagepro` `/imageflash` |
+| ✏️ **Редактирование фото** | `gemini-3.1-flash-image-preview` | ✅ `/1model` `/2model` |
+| 🌐 **Перевод текста** | `gemini-flash-lite-latest` | ❌ |
+| 📺 **YouTube саммари** | `gemini-3-flash-preview` | ❌ |
+| 🔍 **Инлайн-режим** | `gemini-3-flash-preview` + 🌐 поиск | ❌ |
+| 𝕏 **Twitter/X** | FxTwitter API + 💬 Обсуждение | ❌ |
 
 ---
 
-## 4. 🚀 Быстрый старт
+## 4. 🚀 Free Tier Особенности
+- **Лимит запросов:** ~1500 в день.
+- **Генерация фото:** Часто требует привязки Billing в Google Cloud Console (Limit: 0 без карты).
+- **Модели:** Бот оптимизирован под серию Gemini 3 Flash.
+
+---
+
+## 5. 🚀 Быстрый старт
 
 1. Установи Python 3.10+.
 2. Создай и активируй виртуальное окружение.

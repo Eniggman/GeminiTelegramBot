@@ -105,10 +105,10 @@ SEARCH_TOOLS = [
     {"url_context": {}}
 ]
 
-# Модели для генераций изображений (Nano Banana)
+# Модели для генераций изображений (Nano Banana) - Free Tier
 IMAGE_MODELS = {
-    'pro': 'gemini-3-pro-image-preview',  # Nano Banana Pro (thinking mode)
-    'flash': 'gemini-3.1-flash-image-preview'     # Nano Banana Flash (1024px, быстрый)
+    'pro': 'gemini-3.1-flash-image-preview',  # Pro заблокирована, используем Flash
+    'flash': 'gemini-3.1-flash-image-preview'
 }
 
 
@@ -116,6 +116,12 @@ IMAGE_MODELS = {
 avatar_url = "https://raw.githubusercontent.com/Eniggman/GeminiTelegramBot/main/docs/image.png"
 # Гарантированно рабочий черный квадрат (Placehold.co)
 BLACK_SQUARE_URL = "https://placehold.co/600x400/000000/000000.png"
+
+# Паттерн для детекции ссылок Twitter/X
+TWITTER_PATTERN = re.compile(
+    r'https?://(?:www\.)?(?:twitter\.com|x\.com)/\w+/status/(\d+)',
+    re.IGNORECASE
+)
 
 
 # Настройка логирования с ротацией
@@ -201,41 +207,21 @@ def cleanup_log_files() -> None:
 
 
 def get_latest_models() -> dict[str, str]:
-    """Возвращает актуальные версии моделей Gemini."""
-    required_pro = 'gemini-3.1-pro-preview'
-    required_flash = 'gemini-3-flash-preview'
-    required_lite = 'gemini-3.1-flash-lite-preview'
-    
-    # Модели для изображений
-    required_img_pro = 'gemini-3-pro-image-preview'
-    required_img_flash = 'gemini-3.1-flash-image-preview'
+    """
+    Возвращает актуальные версии бесплатных моделей Gemini (Серия 3 и стабильный Lite).
+    """
+    # Новейшие и стабильные бесплатные модели
+    flash_model = 'gemini-3-flash-preview'
+    lite_model = 'gemini-flash-lite-latest'  # Самый стабильный для перевода
+    image_model = 'gemini-3.1-flash-image-preview'
 
-    try:
-        # Получаем список доступных моделей
-        available_models = gemini_client.models.list()
-        available_names = [model.name.replace('models/', '') for model in available_models]
-
-        # Проверяем доступность требуемых моделей
-        for model_id in [required_pro, required_flash, required_img_pro, required_img_flash]:
-            if model_id not in available_names:
-                raise RuntimeError(f"❌ Модель {model_id} недоступна в API!")
-
-        if required_lite not in available_names:
-            # Если лайт недоступна, используем обычный флеш как фоллбек
-            logger.warning(f"⚠️ Модель {required_lite} недоступна, используем {required_flash} для перевода.")
-            required_lite = required_flash
-
-        return {
-            'pro': required_pro, 
-            'flash': required_flash, 
-            'lite': required_lite,
-            'img_pro': required_img_pro,
-            'img_flash': required_img_flash
-        }
-
-    except Exception as e:
-        logger.error(f"Ошибка при проверке моделей: {e}")
-        raise  # Не даём стартовать с неправильными моделями
+    return {
+        'pro': flash_model, # Заглушка для Free Tier
+        'flash': flash_model, 
+        'lite': lite_model,
+        'img_pro': image_model,
+        'img_flash': image_model
+    }
 
 
 
@@ -562,6 +548,16 @@ def format_gemini_error(error: Exception, context_info: str = "") -> str:
 
     # Квота / Rate Limit
     if 'quota' in error_str or 'rate limit' in error_str or '429' in error_str:
+        if 'limit: 0' in error_str:
+            return (
+                f"🚦 {prefix}**Ошибка квоты (Limit: 0)**\n\n"
+                f"Похоже, эта функция (Image Gen) недоступна для чистого Free Tier аккаунта.\n\n"
+                f"**Варианты и их значения:**\n"
+                f"• **Billing Required** (Google требует привязать карту в Cloud Console, чтобы активировать Image-модели, даже если ты не будешь выходить за бесплатные лимиты).\n"
+                f"• **Region Restriction** (В некоторых странах генерация медиа запрещена законом или политикой Google для бесплатных ключей).\n"
+                f"• **Project Type** (Ваш проект в Google Cloud не имеет 'активного' статуса для медиа-запросов).\n\n"
+                f"💡 _Попробуйте использовать текстовые запросы или привяжите Billing в консоли Google._"
+            )
         return f"🚦 {prefix}[QUOTA] Превышен лимит запросов. Попробуй позже.\n`{error_safe[:120]}`"
 
     # Фильтр безопасности
@@ -1348,6 +1344,14 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
 
     if user_id == ADMIN_ID:
+        # Статистика за сегодняшний день
+        day_start = get_day_start()
+        today_activity = [a for a in user_activity if a['timestamp'] >= day_start]
+        
+        # Считаем именно запросы к AI (текст, голос, фото, инлайн)
+        ai_actions = ['chat', 'voice', 'image_gen', 'photo_analyze', 'photo_edit', 'inline', 'youtube_summary', 'translate']
+        today_requests_count = len([a for a in today_activity if a['action'] in ai_actions])
+        
         status_text += f"""
 ━━━━━━━━━━━━━━━━━━━━
 💻 **Сервер** ({platform.system()})
@@ -1364,6 +1368,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎤 Голосовых: {bot_stats['voice_count']}
 ❌ Ошибок: {bot_stats['errors_count']}
 👤 Пользователей: {len(allowed_users)}
+📈 Запросов сегодня: <b>{today_requests_count} / 1500</b>
 """
         if bot_stats['last_errors']:
             status_text += "\n📋 **Последние ошибки:**\n"
@@ -1469,12 +1474,14 @@ async def set_pro_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not check_access(user_id):
         return await update.message.reply_text("⛔️ Нет доступа.")
+    
     context.user_data['model'] = 'pro'
     reset_session(context)
+    
     await update.message.reply_text(
-        f"💎 Модель: <b>Gemini Pro</b>\n"
-        f"\n"
-        f"{MODELS['pro']}",
+        "💎 <b>Gemini Pro</b>\n\n"
+        "Установлена мощная модель Pro.\n"
+        "⚠️ _Примечание: если лимиты Free Tier исчерпаны, бот вернет ошибку квоты._",
         parse_mode='HTML'
     )
 
@@ -1514,6 +1521,7 @@ async def set_image_pro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not check_access(user_id):
         return await update.message.reply_text("⛔️ Нет доступа.")
+    
     uid_str = str(user_id)
     if uid_str not in user_settings:
         user_settings[uid_str] = {}
@@ -1522,11 +1530,24 @@ async def set_image_pro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['image_model'] = 'pro'
     context.user_data.pop('mode', None)
+    
     await update.message.reply_text(
-        f"🎨 Глобальная модель для изображения:\n💎 <b>Pro</b> {IMAGE_MODELS['pro']}",
+        "🎨 <b>Image Pro</b>\n\n"
+        "💎 Установлена модель Pro высокого качества.\n"
+        "⚠️ _Примечание: на бесплатном тарифе (Free Tier) может выдавать ошибку квоты._",
         parse_mode='HTML'
     )
-    log_activity(user_id, update.effective_user.username, 'image_pro_mode', 'установлена глобально')
+    log_activity(user_id, update.effective_user.username, 'image_pro_mode', 'установлена вручную')
+    
+    uid_str = str(user_id)
+    if uid_str not in user_settings:
+        user_settings[uid_str] = {}
+    user_settings[uid_str]['image_model'] = model_to_set
+    save_user_settings()
+    
+    context.user_data['image_model'] = model_to_set
+    context.user_data.pop('mode', None)
+    log_activity(user_id, update.effective_user.username, 'image_pro_blocked', 'попытка выбора заблокирована')
 
 
 async def set_image_flash(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2650,6 +2671,46 @@ async def _process_fast_commands(
     return False
 
 
+async def _process_twitter_link(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    user_id: int
+) -> bool:
+    """
+    Детектирует ссылку на Twitter/X в сообщении и предлагает действия.
+    Запрос к FxTwitter API делается только по нажатию кнопки — не здесь.
+    Возвращает True если ссылка найдена.
+    """
+    match = TWITTER_PATTERN.search(text)
+    if not match:
+        return False
+
+    tweet_id = match.group(1)
+    tweet_url = match.group(0)  # Полный URL из сообщения
+
+    # Сохраняем только ID и URL — без лишних запросов к API
+    context.user_data['pending_tweet'] = {
+        'id': tweet_id,
+        'url': tweet_url
+    }
+
+    # Кнопки действий
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("💬 Обсудить", callback_data="twitter_discuss"),
+        InlineKeyboardButton("📤 Отправить", callback_data="twitter_send")
+    ]])
+
+    await update.message.reply_text(
+        "Что вы хотите с этим сделать?",
+        reply_markup=keyboard,
+        reply_to_message_id=update.message.message_id
+    )
+
+    log_activity(user_id, update.effective_user.username, "twitter_link", tweet_url[:60])
+    return True
+
+
 async def _process_reply_to_photo(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2844,6 +2905,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Реплай на фото — анализ изображения
     if await _process_reply_to_photo(update, context, user_id):
+        return
+
+    # Twitter/X ссылка — предлагаем действия (без запроса к API)
+    if await _process_twitter_link(update, context, text, user_id):
         return
 
     # Подсчет сообщений
@@ -3360,8 +3425,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("⛔️ Нет доступа.", show_alert=False)
         return
 
-    # Кнопки перегенерации — им не нужен photo_task, обрабатываем отдельно
-    if action in ("img_regen", "img_edit_regen"):
+    # Кнопки перегенерации и Twitter — им не нужен photo_task, обрабатываем отдельно
+    if action in ("img_regen", "img_edit_regen", "twitter_discuss", "twitter_send"):
         # Ответ на callback будет внутри обработчиков ниже
         pass
     else:
@@ -3575,6 +3640,190 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['mode'] = 'awaiting_new_edit_prompt'
         await query.edit_message_text("✏️ Опишите другие правки для этого фото:")
 
+    # --- TWITTER КНОПКИ ---
+
+    elif action == "twitter_discuss":
+        # Обсуждение твита через Gemini.
+        # FxTwitter даёт нам текст твита (Twitter блокирует url_context Gemini).
+        # Текст вставляем в промпт — Gemini анализирует и отвечает.
+        tweet_data = context.user_data.get('pending_tweet')
+        if not tweet_data:
+            await query.answer("Данные устарели. Отправьте ссылку заново.", show_alert=True)
+            return
+
+        await query.answer()
+        tweet_url = tweet_data['url']
+        tweet_id = tweet_data['id']
+
+        await query.edit_message_text("💬 Загружаю твит...")
+
+        # Получаем текст твита через FxTwitter API (бесплатно, без авторизации)
+        tweet_text = ""
+        author = ""
+        try:
+            api_url = f"https://api.fxtwitter.com/status/{tweet_id}"
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(requests.get, api_url, timeout=10),
+                timeout=15.0
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                tw = data.get('tweet', {})
+                tweet_text = tw.get('text', '')
+                author = tw.get('author', {}).get('screen_name', '')
+        except Exception as e:
+            logger.warning(f"FxTwitter fetch error (discuss): {e}")
+
+        # Формируем промпт для Gemini с текстом твита
+        if tweet_text:
+            prompt = (
+                f"Обсудим этот твит от @{author}:\n\n\"{tweet_text}\"\n\n"
+                f"Ссылка: {tweet_url}"
+            )
+        else:
+            # Фоллбек: если FxTwitter не вернул текст — даём только URL
+            prompt = f"Обсудим этот твит: {tweet_url}"
+
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        thinking_msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="⚡ Анализирую твит..."
+        )
+
+        try:
+            chat = get_or_create_session(context)
+            response_gemini = await asyncio.wait_for(
+                asyncio.to_thread(chat.send_message, prompt),
+                timeout=TIMEOUT_MEDIUM
+            )
+            await delete_safe(thinking_msg)
+
+            response_text = response_gemini.text if response_gemini and response_gemini.text else "Не удалось получить ответ"
+            formatted = format_for_telegram(response_text)
+
+            # Разбиваем на части если длинный ответ
+            for chunk_start in range(0, len(formatted), MAX_MESSAGE_LENGTH):
+                chunk = formatted[chunk_start:chunk_start + MAX_MESSAGE_LENGTH]
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=chunk,
+                    parse_mode='HTML'
+                )
+
+            log_activity(user_id, query.from_user.username, "twitter_discuss", tweet_url[:50])
+            context.user_data.pop('pending_tweet', None)
+
+        except Exception as e:
+            await delete_safe(thinking_msg)
+            log_error("TWITTER_DISCUSS", str(e), user_id)
+            error_msg = format_gemini_error(e, "TWITTER_DISCUSS")
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=error_msg,
+                parse_mode='HTML'
+            )
+
+    elif action == "twitter_send":
+        # Отправка медиа из твита (запрос к FxTwitter делается здесь)
+        tweet_data = context.user_data.get('pending_tweet')
+        if not tweet_data:
+            await query.answer("Данные устарели. Отправьте ссылку заново.", show_alert=True)
+            return
+
+        await query.answer()
+        tweet_url = tweet_data['url']
+        tweet_id = tweet_data['id']
+
+        await query.edit_message_text("📤 Загружаю медиа из твита...")
+
+        # Получаем данные твита через FxTwitter API
+        try:
+            api_url = f"https://api.fxtwitter.com/status/{tweet_id}"
+            response = await asyncio.wait_for(
+                asyncio.to_thread(requests.get, api_url, timeout=10),
+                timeout=15.0
+            )
+
+            if response.status_code != 200:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"❌ Не удалось получить данные твита (HTTP {response.status_code})."
+                )
+                return
+
+            data = response.json()
+            tw = data.get('tweet', {})
+            tweet_text = tw.get('text', '')
+            author = tw.get('author', {}).get('screen_name', '')
+            author_name = tw.get('author', {}).get('name', '')
+            likes = tw.get('likes', 0)
+            retweets = tw.get('retweets', 0)
+            photos = []
+
+            media = tw.get('media', {})
+            if media:
+                photos = [p['url'] for p in media.get('photos', [])]
+
+            # Формируем подпись: автор + текст + статистика + ссылка
+            caption_parts = []
+            if author:
+                caption_parts.append(f"🐦 {author_name} (@{author})")
+            if tweet_text:
+                caption_parts.append(tweet_text)
+            if likes or retweets:
+                stats = []
+                if likes:
+                    stats.append(f"❤️ {likes:,}")
+                if retweets:
+                    stats.append(f"🔁 {retweets:,}")
+                caption_parts.append(" · ".join(stats))
+            caption_parts.append(tweet_url)
+
+            caption = "\n\n".join(caption_parts)[:1024]  # Лимит Telegram
+
+            if not photos:
+                # Нет медиа — просто отправляем текст с инфой
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=caption or "Медиа в этом твите не найдено."
+                )
+            elif len(photos) == 1:
+                # Одно фото — Telegram сам скачивает по URL с CDN Twitter
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=photos[0],
+                    caption=caption
+                )
+            else:
+                # Несколько фото — альбом (MediaGroup)
+                # Лимит Telegram: 10 фото в альбоме
+                media_group = [
+                    InputMediaPhoto(
+                        media=url,
+                        caption=caption if i == 0 else None  # Подпись только у первого
+                    )
+                    for i, url in enumerate(photos[:10])
+                ]
+                await context.bot.send_media_group(
+                    chat_id=update.effective_chat.id,
+                    media=media_group
+                )
+
+            log_activity(user_id, query.from_user.username, "twitter_send", f"{len(photos)} photos")
+            context.user_data.pop('pending_tweet', None)
+
+        except asyncio.TimeoutError:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⏱ Превышено время загрузки твита. Попробуйте ещё раз."
+            )
+        except Exception as e:
+            log_error("TWITTER_SEND", str(e), user_id)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ Ошибка: <code>{escape_html(str(e)[:200])}</code>",
+                parse_mode='HTML'
+            )
 
 
 # --- ЗАПУСК ---
