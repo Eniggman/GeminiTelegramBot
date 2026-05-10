@@ -1,183 +1,143 @@
 # 📁 Структура Проекта
 
-> **Быстрый справочник** по архитектуре Google Gemini Telegram Bot 2.0
-
----
-```markdown
-## 🎛 Используемые Модели (Быстрая Справка)
-
-> [!NOTE]
-> В режиме **Free Tier** (без оплаты) бот автоматически заменяет `Pro` модели на `Flash`.
-
-| Функция               | Модель Gemini (Paid) | Модель Gemini (Free) |
-|:----------------------|:---------------------|:---------------------|
-| 💬 Текстовый чат      | `gemini-3.1-pro-preview` | `gemini-3-flash-preview` |
-| 🎤 Голос (Voice)      | `gemini-3.1-flash-preview` | `gemini-3-flash-preview` |
-| 🎨 Генерация картинок | `gemini-3-pro-image-preview` | `gemini-3.1-flash-image-preview` (limit 0) |
-| ✏️ Редактирование     | `gemini-3-pro-image-preview` | `gemini-3.1-flash-image-preview` (limit 0) |
-| 🌐 Перевод (Текст)    | `gemini-3.1-flash-lite-preview` | `gemini-flash-lite-latest` |
-| 🌐 Перевод (Фото)     | `gemini-3.1-flash-image-preview` | `gemini-3.1-flash-image-preview` (limit 0) |
-| 📺 YouTube Саммари    | `gemini-3-flash-preview` | `gemini-3-flash-preview` |
-| 🔍 Инлайн-поиск       | `gemini-3-flash-preview` | `gemini-3-flash-preview` |
-| 📄 Анализ документов  | Текущая активная модель чата | Текущая активная модель чата |
-```
+> **Быстрый справочник** по архитектуре `googlebot.py`
 
 ---
 
-## ⚡ Быстрые команды (Префиксы)
+## 🎛 Используемые модели
 
-> Команды с пометкой 📝 поддерживают **два режима**:
-> - Без аргумента → включает **режим ожидания** (бот ждёт следующее сообщение)
-> - С текстом через пробел → **мгновенное выполнение** в одном сообщении
+| Функция | Pro модель | Flash модель | Если без выбора Pro/Flash |
+|:---|:---|:---|:---|
+| 💬 Текстовый чат | `gemini-3-flash-preview` временно вместо Pro | `gemini-2.5-flash` | — |
+| 🌐 Чат с интернетом / tools | `gemini-3-flash-preview` временно вместо Pro | `gemini-2.5-flash` | Google Search + URL context работают |
+| 🎤 Голос | — | — | `gemini-2.5-flash` |
+| 🎨 Генерация картинок | `gemini-3.1-flash-image-preview` | `gemini-3.1-flash-image-preview` | проверять по ключу |
+| ✏️ Редактирование картинок | `gemini-3.1-flash-image-preview` | `gemini-3.1-flash-image-preview` | проверять по ключу |
+| 🌐 Перевод текста | — | — | `gemini-2.5-flash-lite` |
+| 🌐 Перевод фото | — | — | `gemini-3.1-flash-image-preview` |
+| 📺 YouTube саммари | — | — | `gemini-2.5-flash` |
+| 🔍 Инлайн | — | — | `gemini-2.5-flash` |
+| 📄 Документы | `gemini-3-flash-preview` временно вместо Pro | `gemini-2.5-flash` | — |
 
-| Префикс               | Действие                      | Где в коде (строки) | Пример                         |
-|:----------------------|:------------------------------|:----------------:|:-------------------------------|
-| `п` / `про` / `pro`   | 💎 Переключить на Gemini Pro  |   `2581`         | `п`                            |
-| `ф` / `флеш` / `flash`| ⚡ Переключить на Gemini Flash |   `2588`         | `ф`                            |
-| `к` / `картинка`      | 🎨 Генерация изображения      | `2607` / `2651`  | `к красивый закат`             |
-| `к про`               | 💎 Модель картинок → Pro      |   `2618`         | `к про`                        |
-| `к флеш`              | ⚡ Модель картинок → Flash     |   `2634`         | `к флеш`                       |
-| `пр` / `перевод`      | 🌐 Перевод текста/фото        | `2441` / `2450`  | `пр hello world`               |
-| `р` / `редактировать` | ✏️ Режим редактирования фото  |   `2661`         | `р`                            |
-| `ю` / `ютуб` / `самари`  | 📺 YouTube саммари             | `2482` / `2492`  | `ю https://youtu.be/...`       |
-| `превью` / `пре`      | 🖼️ YouTube превью             | `2535` / `2545`  | `превью https://youtu.be/...`  |
-| `.`                   | 🧹 Сброс контекста            |   `2595`         | `.`                            |
-| `выход` / `exit`      | ⏹️ Выход из режима            |   `2436`         | `выход`                        |
+> Примечание: по тесту на текущем API-ключе `gemini-2.5-flash` работает и без tools, и с Google Search + URL context. `gemini-3-flash-preview` (используемая как Pro) работает без tools, но с tools получает `429 RESOURCE_EXHAUSTED`.
+
 ---
 
-## 📱 Меню Команд (BotFather)
+## ⚡ Быстрые команды
 
-> **Для настройки меню в Telegram BotFather (`/setcommands`):**
+| Префикс / команда | Действие | Основная функция | Пример |
+|:---|:---|:---|:---|
+| `/start` | 🔄 Сброс контекста | `start()` | `/start` |
+| `/status` | 📊 Статус бота | `status_command()` | `/status` |
+| `/help` | ❓ Справка | `help_command()` | `/help` |
+| `/1model` | 💎 Text Pro | `set_pro_model()` | `/1model` |
+| `/2model` | ⚡ Text Flash | `set_flash_model()` | `/2model` |
+| `/imagepro` | 🎨 Image Pro | `set_image_pro()` | `/imagepro` |
+| `/imageflash` | 🎨 Image Flash | `set_image_flash()` | `/imageflash` |
+| `к` / `картинка` | 🎨 Генерация изображения | `_process_fast_commands()` | `к кот в космосе` |
+| `р` / `редактировать` | ✏️ Редактирование фото | `handle_photo()` | `р сделай ярче` |
+| `пр` / `перевод` | 🌐 Перевод текста/фото | `_process_translation_mode()` / `handle_photo()` | `пр hello` |
+| `ю` / `ютуб` | 📺 YouTube саммари | `_process_youtube_mode()` | `ю https://youtu.be/...` |
+| `превью` / `пре` | 🖼️ YouTube превью | `get_youtube_preview()` | `превью https://youtu.be/...` |
+| `.` | 🧹 Сброс режима | `_process_exit_commands()` | `.` |
+| `выход` / `exit` | ⏹️ Выход из режима | `_process_exit_commands()` | `выход` |
+
+---
+
+## 📱 Меню команд Telegram
 
 ```text
-/start - 🔄 Сбросить контекст чата
-/status - 📊 Статус сервера и бота (только админ)
-/1model - 💎 Включить Gemini Pro (для текста)
-/2model - ⚡ Включить Gemini Flash (для текста)
-/imagepro - 🎨 Включить Gemini Pro (для фото)
-/imageflash - ⚡ Включить Gemini Flash (для фото)
-/help - ❓ Справка по всем командам
+/start - 🔄 Сбросить контекст
+/status - 📊 Статус бота
+/youtube - 📺 YouTube Саммари
+/imagepro - 🎨💎Image Pro
+/imageflash - 🎨⚡Image Flash
+/1model - 💎Text Gemini Pro
+/2model - ⚡Text Gemini Flash
+/help - ❓ Справка
 ```
+---
+
+## 🧩 Архитектура `googlebot.py` (всего ~5027 строк)
+
+| Строки | Раздел | Что внутри |
+|:---:|:---|:---|
+| `1-206` | Импорты и конфигурация | env, лимиты, TTL, системные промпты |
+| `207-310` | Логи и модели | `cleanup_log_files()`, `get_latest_models()`, `initialize_models()` |
+| `311-544` | RAM / errors / temp / HTTP | RSS, `sanitize_error()`, `delete_safe()`, `httpx.AsyncClient` |
+| `545-680` | Activity log | JSONL, daily counters, Киевское время |
+| `681-760` | Пользователи и настройки | users, settings, выбор моделей |
+| `761-840` | MediaRef и изображения | `MediaRef`, download, resize/compress |
+| `841-942` | Cleanup task | TTL, albums, temp files, session limits |
+| `943-1250` | Gemini sessions | `reset_session()`, `get_or_create_session()` |
+| `1251-1550` | Форматирование и отправка | errors, HTML/LaTeX, `send_safe_message` |
+| `1551-1800` | Image API | `generate_image()`, `edit_image()` |
+| `1801-2250` | Генерация и YouTube | YouTube preview, transcript, summary |
+| `2251-2295` | Команды | `/start`, `/status`, `/help`, управление моделями |
+| `2296-3076` | Медиа handlers | voice, photo, albums, documents |
+| `3077-3837` | Message helpers | _process_ functions (fast commands, translate, YouTube) |
+| `3838-4085` | Text dispatcher | `handle_message()` |
+| `4086-4425` | Inline | inline query и chosen result |
+| `4426-4908` | Callback-и | кнопки фото, image regen, Twitter/X |
+| `4909-4967` | Lifecycle | `post_init()`, `post_shutdown()` |
+| `4968+` | Запуск | `main()` |
 
 ---
 
-## 🗂 Файловая Структура
+## 📦 Основные функции
 
-```
-bot/
-├── googlebot.py       # 🎯 Основной код бота (~3514 строки)
-├── README.md          # 📖 Документация для пользователей
-├── PROJECT_STRUCTURE.md # 👈 Этот файл
-├── requirements.txt   # 📦 Зависимости Python (на сервере)
-├── .env               # 🔐 Токены (BOT_TOKEN, GEMINI_API_KEY)
-├── .gitignore         # 🚫 Игнорируемые файлы Git
-├── bot.log            # 📋 Логи работы бота
-├── activity_log.json  # 📊 Логи активности пользователей
-├── allowed_users.json # 👥 Белый список пользователей
-├── deploy.ps1         # 🚀 Скрипт деплоя на сервер
-├── commit.ps1         # 📤 Скрипт коммита в Git
-```
-
----
-
-## 🧩 Архитектура `googlebot.py`
-
-### 📍 Разделы файла (по строкам)
-
-| `1-160` | **Импорты и константы** | Библиотеки, тайм-ауты, лимиты, TWITTER_PATTERN, **Системные промты (78-100)** |
-| `161-228` | **Очистка и Модели** | `cleanup_log_files()`, `get_latest_models()` |
-| `229-248` | **Инициализация** | `initialize_models()`, `MODELS`, `BOT_AVATAR_URL` |
-| `249-324` | **Память и Ошибки** | Память бота, статистика, `delete_safe()`, `global_error_handler` |
-| `325-392` | **Логирование активности** | Логи активности (Киевское время), `log_activity` |
-| `393-464` | **Управление пользователями** | Доступ, настройки, аватарка, сессии Gemini |
-| `465-505` | **Сессии чата** | `reset_session()`, `get_or_create_session()` |
-| `506-872` | **Обработка текста** | `format_gemini_error()`, очистка HTML/LaTeX, `send_safe_message` |
-| `873-1253` | **Медиа-сервисы** | `generate_image()`, `edit_image()`, YouTube Саммари |
-| `1254-1548` | **Команды бота** | `/start`, `/help`, `/status`, управление доступом |
-| `1549-1627` | **Обработчик голоса** | Голосовые сообщения в текст |
-| `1628-2150` | **Фото и Документы** | `handle_photo()`, `process_album_delayed()`, `handle_document` |
-| `2151-2890` | **Обработчик сообщений** | Диспетчер `handle_message()` и хелперы (Р, Пр, Ю, К) |
-| `2891-3240` | **Инлайн-режим** | `handle_inline_query()`, `handle_chosen_inline_result()` |
-| `3241-3545` | **Callback-и и Запуск** | `button_callback()`, `post_init()`, `main()` |
-
+| Функция | Строка | Назначение |
+|:---|:---:|:---|
+| `get_process_rss_mb()` | `352` | RSS процесса |
+| `log_memory()` | `361` | лог RAM при `MEMORY_DEBUG=1` |
+| `sanitize_error()` | `395` | очистка текста ошибок |
+| `safe_delete_file()` | `439` | безопасное удаление файла |
+| `get_http_client()` | `499` | общий `httpx.AsyncClient` |
+| `log_activity()` | `619` | лог активности |
+| `save_activity_log()` | `633` | запись в `activity_log.jsonl` |
+| `prepare_image_for_gemini()` | `785` | сжатие изображения перед API |
+| `get_or_create_session()` | `984` | Gemini chat session |
+| `generate_image()` | `1563` | генерация картинки |
+| `edit_image()` | `1591` | редактирование картинки |
+| `status_command()` | `1943` | `/status` |
+| `handle_voice()` | `2296` | голосовые сообщения |
+| `handle_photo()` | `2412` | фото и альбомы |
+| `process_album_delayed()` | `2821` | сборка и обработка альбомов |
+| `handle_document()` | `2979` | документы |
+| `handle_message()` | `3838` | текстовые сообщения (диспетчер) |
+| `handle_inline_query()` | `4086` | inline-запросы |
+| `button_callback()` | `4426` | callback-кнопки |
+| `post_init()` | `4909` | запуск cleanup/http/menu |
+| `main()` | `4968` | запуск Application |
 
 ---
 
-## 🔧 Ключевые Компоненты
+## 🧠 Память и cleanup
 
-### 🧠 AI Модели
-
-```python
-# Строки 109-112: Модели генерации изображений
-IMAGE_MODELS = {
-    'pro': 'gemini-3-pro-image-preview',
-    'flash': 'gemini-3.1-flash-image-preview'
-}
-
-# Строки 201-228: Модели чата (проверяются при старте через API)
-MODELS = {
-    'pro': 'gemini-3.1-pro-preview',
-    'flash': 'gemini-3-flash-preview'
-}
-```
-
-### 🧠 Системные промпты (System Instructions)
-
-| Промпт | Строка | Где используется |
-|:-------|:------:|:-----------------|
-| `SYSTEM_INSTRUCTION_FLASH` | `80` | Чат Flash, голос, YouTube саммари |
-| `SYSTEM_INSTRUCTION_PRO` | `89` | Чат Pro |
-| Инлайн-промпт (захардкожен) | `3195` | `handle_chosen_inline_result()` → Gemini инлайн |
-
-### 📦 Основные Функции
-
-| Функция                   | Строка | Назначение                   |
-|:--------------------------|:------:|:-----------------------------|
-| `delete_safe()`          |  `317`   | Безопасное удаление сообщений |
-| `edit_image()`           |  `973`   | Редактирование фото/альбомов |
-| `handle_photo()`         |  `1674`  | Обработка фото и альбомов    |
-| `process_album_delayed()`|  `1978`  | Сборка и обработка альбомов  |
-| `button_callback()`      |  `3337`  | Обработка кнопок под фото    |
-| **Перевод текста**       |  `2699`  | `_process_translation_mode`  |
-| **Перевод фото**         |  `1722`  | `handle_photo` (блок перевода)|
+| Компонент | Что делает |
+|:---|:---|
+| `MediaRef` | Использует `file_id` вместо хранения `bytes` в RAM |
+| `pending_albums` | Временное хранилище для сборки медиа-групп |
+| `cleanup_loop()` | Фоновая очистка старых сессий, альбомов и файлов |
+| `tmp_media/` | Папка для временных файлов |
+| `gc_collect_after_media()` | Принудительный сбор мусора после тяжелых задач |
 
 ---
 
-## 🔧 Переменные окружения (.env)
+## 🔧 Переменные окружения `.env`
 
-| Переменная            | Обязательная? | Описание                      |
-|:----------------------|:-------------:|:------------------------------|
-| `TELEGRAM_TOKEN`      |       ✅       | Токен бота от @BotFather      |
-| `GEMINI_API_KEY`      |       ✅       | Ключ Gemini API               |
-| `ADMIN_ID`            |       ❌       | Telegram ID администратора    |
-| `ALLOWED_USERS`       |       ❌       | Белый список ID через запятую |
-
----
-
-## 📡 Callback кнопок
-
-| `callback_data` | Назначение              |
-|:----------------|:------------------------|
-| `photo_analyze` | 🔍 Анализировать фото   |
-| `photo_edit`    | ✏️ Редактировать фото   |
-| `photo_add_caption` | 📝 Добавить описание к фото |
-| `img_regen`     | 🔄 Перегенерировать картинку |
-| `img_edit_regen` | 🔄 Перегенерировать редактирование |
-| `inline_loading` | ⏳ Заглушка инлайн-режима |
-| `twitter_discuss` | 💬 Обсудить твит через Gemini |
-| `twitter_send`   | 📤 Отправить медиа + текст твита |
+| Переменная | Описание |
+|:---|:---|
+| `TELEGRAM_TOKEN` | токен Telegram бота |
+| `GEMINI_API_KEY` | ключ Gemini API |
+| `ADMIN_ID` | Telegram ID администратора |
+| `MEMORY_DEBUG` | `1` для детальных логов RAM |
 
 ---
 
-## 🔍 Инлайн-режим (кратко)
+## 📊 Логи
 
-- **Вызов:** `@bot_name запрос`
-- **Команды:** `пр` (перевод), `ю` (YouTube), `пре` (превью), текст (Gemini).
-- **Модель:** `3-flash-preview` (фиксированная).
-
----
-
-## 🔗 Полезные Ссылки
-
-- [Gemini API Docs](https://ai.google.dev/gemini-api/docs)
-- [Telegram Bot API](https://core.telegram.org/bots/api)
+| Файл | Назначение |
+|:---|:---|
+| `bot.log` | Технические логи системы |
+| `activity_log.jsonl` | Лог действий пользователей (Киевское время) |

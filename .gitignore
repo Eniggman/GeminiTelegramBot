@@ -2,10 +2,13 @@
 __pycache__/
 *.py[cod]
 *.so
+*.bak
+*.swp
 
 # Виртуальное окружение
 .venv/
 venv/
+.pytest_cache/
 
 # Секреты и переменные окружения
 .env
@@ -22,8 +25,14 @@ known_models.json
 *.code-workspace
 
 # Локальные скрипты
-*.ps1
+commit.ps1
+deploy.ps1
 *.bat
 
 # Gemini agent
 .agent/
+
+# Системные файлы
+desktop.ini
+Thumbs.db
+.DS_Store
