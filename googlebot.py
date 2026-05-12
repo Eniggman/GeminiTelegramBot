@@ -163,10 +163,7 @@ TWITTER_PATTERN = re.compile(
 # Настройка логирования с ротацией
 
 # Константы для логирования
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
-os.makedirs(LOGS_DIR, exist_ok=True)
-
-LOG_FILE = os.path.join(LOGS_DIR, "bot.log")
+LOG_FILE = os.path.join(os.path.dirname(BASE_DIR), "logs", "bot.log")
 LOG_MAX_BYTES = 50 * 1024 * 1024  # 50 МБ максимум на файл
 LOG_BACKUP_COUNT = 1  # Хранить 1 бэкап (итого макс ~100 МБ)
 ACTIVITY_LOG_MAX_ENTRIES = 200  # Максимум последних событий activity_log в RAM
@@ -557,7 +554,7 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 # Файл для логов активности
-ACTIVITY_LOG_FILE = os.path.join(LOGS_DIR, "activity_log.jsonl")
+ACTIVITY_LOG_FILE = os.path.join(os.path.dirname(BASE_DIR), "logs", "activity_log.jsonl")
 LEGACY_ACTIVITY_LOG_FILE = os.path.join(BASE_DIR, "activity_log.json")
 
 # Структура логов
@@ -1978,13 +1975,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     disk_path = "C:" if platform.system() == "Windows" else "/"
     disk = psutil.disk_usage(disk_path)
 
-    # Конвертация байт в ГБ
-    ram_total_gb = f"{ram.total / (1024**3):.1f}"
-    ram_used_gb = f"{ram.used / (1024**3):.1f}"
+    # Конвертация байт в ГБ (оставляем 3 знака для максимальной точности)
+    ram_total_gb = f"{ram.total / (1024**3):.3f}"
+    ram_used_gb = f"{ram.used / (1024**3):.3f}"
     process_rss_mb = get_process_rss_mb()
 
-    disk_total_gb = f"{disk.total / (1024**3):.1f}"
-    disk_used_gb = f"{disk.used / (1024**3):.1f}"
+    disk_total_gb = f"{disk.total / (1024**3):.2f}"
+    disk_used_gb = f"{disk.used / (1024**3):.2f}"
 
     if last_time:
         minutes_ago = int((time.time() - last_time) / 60)
@@ -2058,25 +2055,18 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💻 **Сервер** ({platform.system()})
 
 🖥 CPU: {cpu_usage}%
-💾 RAM: {ram_used_gb}/{ram_total_gb} GB ({ram.percent}%)
+💾 RAM: {ram_used_gb} / {ram_total_gb} GB ({ram.percent}%)
 🧠 RSS бота: {process_rss_mb:.1f} MB
-💿 Disk: {disk_used_gb}/{disk_total_gb} GB ({disk.percent}%)
+💿 Disk: {disk_used_gb} / {disk_total_gb} GB ({disk.percent}%)
 
 ━━━━━━━━━━━━━━━━━━━━
-🔧 **Статистика бота**
-
-⏱ Аптайм: {uptime_hours}ч {uptime_min}м
-💬 Сообщений: {bot_stats["messages_count"]}
-🎤 Голосовых: {bot_stats["voice_count"]}
+📈 Запросы сегодня: **{today_requests_count} / 1500**
 ❌ Ошибок: {bot_stats["errors_count"]}
-👤 Пользователей: {len(allowed_users)}
-📈 Запросов сегодня: <b>{today_requests_count} / 1500</b>
-
-🧠 Chat sessions: {active_chat_sessions}/{MAX_ACTIVE_CHAT_SESSIONS}, max {MAX_CHAT_MESSAGES_PER_SESSION} msg
-🧹 Cleanup: {cleanup_stats["runs"]} запусков, очищено {cleanup_removed_total}
-🕒 Последний cleanup: {cleanup_last_run_text}
-📁 Temp: {temp_files_count} файлов / {temp_files_size_mb:.1f} MB
+🧠 Активных сессий: {active_chat_sessions}
 """
+        if temp_files_count > 0:
+            status_text += f"📁 Temp: {temp_files_count} файлов / {temp_files_size_mb:.1f} MB\n"
+
         if bot_stats["last_errors"]:
             status_text += "\n📋 **Последние ошибки:**\n"
             for err in bot_stats["last_errors"][-5:]:
@@ -2086,11 +2076,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Статистика за сегодняшний день
         user_stats = daily_counters["users"]
 
-        # Текущее время по Киеву
-        now_kyiv = datetime.now(KYIV_TZ).strftime("%H:%M")
+        # Текущее время и дата по Киеву
+        now_kyiv = datetime.now(KYIV_TZ)
+        now_date = now_kyiv.strftime("%d.%m.%Y")
+        now_time = now_kyiv.strftime("%H:%M")
 
         status_text += "\n━━━━━━━━━━━━━━━━━━━━\n"
-        status_text += f"📅 **Сегодня** (Киев {now_kyiv})\n\n"
+        status_text += f"📅 **{now_date}** (Киев {now_time})\n\n"
 
         if user_stats:
             for uid, stats in user_stats.items():
@@ -2109,17 +2101,18 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ]
                 )
 
-                status_text += f"👤 {username}: **{total}** действий\n"
-                if stats["text"] > 0:
-                    status_text += f"   💬 Текст: {stats['text']}\n"
-                if stats["voice"] > 0:
-                    status_text += f"   🎤 Голос: {stats['voice']}\n"
-                if stats["img_gen"] > 0:
-                    status_text += f"   🖼️ Генерация: {stats['img_gen']}\n"
-                if stats["img_analyze"] > 0:
-                    status_text += f"   Анализ: {stats['img_analyze']}\n"
-                if stats["img_edit"] > 0:
-                    status_text += f"   ✏️ Редактирование: {stats['img_edit']}\n"
+                if total > 0:
+                    status_text += f"👤 {username}: **{total}** действий\n"
+                    if stats["text"] > 0:
+                        status_text += f"   💬 Текст: {stats['text']}\n"
+                    if stats["voice"] > 0:
+                        status_text += f"   🎤 Голос: {stats['voice']}\n"
+                    if stats["img_gen"] > 0:
+                        status_text += f"   🖼️ Генерация: {stats['img_gen']}\n"
+                    if stats["img_analyze"] > 0:
+                        status_text += f"   🔍 Анализ: {stats['img_analyze']}\n"
+                    if stats["img_edit"] > 0:
+                        status_text += f"   ✏️ Редактирование: {stats['img_edit']}\n"
         else:
             status_text += "Нет активности за сегодня\n"
 
@@ -2292,6 +2285,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Отправьте фото → кнопки Анализировать | ✏️ Редактировать
 • 📷 Альбом (2-10 фото) → поддержка нескольких изображений
 • Фото + подпись → мгновенный ответ
+
+**🐦 Соцсети и Видео:**
+• **X/Twitter:** Отправь ссылку на твит → бот загрузит текст и медиа. Можно нажать «Обсудить» и задать вопрос по твиту.
+• **YouTube:** Отправь ссылку с приставкой **Ю** → бот сделает саммари. После этого можно задавать вопросы по видео.
 
 **📄 Документы:** PDF, TXT, CSV, JSON → суммаризация
 
@@ -3643,6 +3640,73 @@ async def _process_fast_commands(
     return False
 
 
+async def fetch_tweet_data(tweet_id: str, app: Application) -> tuple:
+    """
+    Получает данные твита параллельно через несколько API.
+    Все запросы запускаются одновременно — побеждает первый успешный.
+    Вынесена на уровень модуля, чтобы быть доступной и из button_callback,
+    и из handle_message при обработке вопроса пользователя.
+    """
+    apis = [
+        f"https://api.fxtwitter.com/status/{tweet_id}",
+        f"https://api.vxtwitter.com/status/{tweet_id}",
+        f"https://api.fixupx.com/status/{tweet_id}",
+    ]
+
+    client = await get_http_client(app)
+    PER_REQUEST_TIMEOUT = 7.0
+
+    async def try_api(url: str):
+        try:
+            logger.debug(f"Twitter fetch attempt: {url}")
+            resp = await asyncio.wait_for(client.get(url), timeout=PER_REQUEST_TIMEOUT)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "tweet" in data:
+                    return data["tweet"]
+        except Exception as e:
+            logger.warning(f"Twitter API failed ({url.split('/')[2]}): {type(e).__name__}: {str(e)[:80]}")
+        return None
+
+    tasks = [asyncio.create_task(try_api(url)) for url in apis]
+    last_error = "Все API вернули ошибку или пустой ответ"
+    result = None
+
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=PER_REQUEST_TIMEOUT + 1.0,
+        )
+        for task in done:
+            try:
+                val = task.result()
+                if val is not None:
+                    result = val
+                    break
+            except Exception:
+                pass
+
+        if result is None and pending:
+            done2, _ = await asyncio.wait(pending, timeout=2.0)
+            for task in done2:
+                try:
+                    val = task.result()
+                    if val is not None:
+                        result = val
+                        break
+                except Exception:
+                    pass
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+
+    if result is not None:
+        return result, None
+    return None, last_error
+
+
 async def _process_twitter_link(
     update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, user_id: int
 ) -> bool:
@@ -3810,6 +3874,12 @@ async def _process_youtube_mode(
 
         if result["success"]:
             await send_safe_message(update, result["summary"])
+            # Сохраняем саммари в контекст для последующего обсуждения
+            context.user_data["active_youtube"] = {
+                "summary": result["summary"],
+                "timestamp": time.time(),
+                "injected": False
+            }
             log_activity(
                 user_id, update.effective_user.username, "youtube_summary", text
             )
@@ -3944,6 +4014,69 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("mode", None)
         return await _process_youtube_mode(update, context, text, user_id)
 
+    # Режим вопроса о твите (Шаг 2: пользователь написал вопрос — идём к Gemini)
+    if context.user_data.get("mode") == "twitter_question_mode":
+        context.user_data.pop("mode", None)
+        tweet_data = context.user_data.get("pending_tweet")
+        if not tweet_data:
+            await update.message.reply_text(
+                "⚠️ Данные твита устарели. Отправьте ссылку заново.",
+                reply_to_message_id=update.message.message_id,
+            )
+            return
+
+        tweet_url = tweet_data["url"]
+        tweet_id = tweet_data["id"]
+        user_question = text.strip()
+
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        thinking_msg = await update.message.reply_text(
+            "⚡ Загружаю твит и думаю...", reply_to_message_id=update.message.message_id
+        )
+
+        # Получаем данные твита через модульную функцию (параллельные запросы)
+        tw, error = await fetch_tweet_data(tweet_id, context.application)
+
+        tweet_text = ""
+        author = ""
+        if tw:
+            tweet_text = tw.get("text", "")
+            author = tw.get("author", {}).get("screen_name", "")
+
+        # Формируем промпт: контекст твита + вопрос пользователя
+        if tweet_text:
+            prompt = (
+                f'Твит от @{author}:\n\n"{tweet_text}"\n'
+                f"Ссылка: {tweet_url}\n\n"
+                f"Вопрос: {user_question}"
+            )
+        else:
+            # Данные не получены — отправляем только ссылку + вопрос
+            prompt = f"Твит: {tweet_url}\n\nВопрос: {user_question}"
+
+        try:
+            chat = get_or_create_session(context)
+            response_gemini = await asyncio.wait_for(
+                asyncio.to_thread(chat.send_message, prompt), timeout=TIMEOUT_MEDIUM
+            )
+            increment_chat_message_count(context)
+            await delete_safe(thinking_msg)
+
+            response_text = (
+                response_gemini.text
+                if response_gemini and response_gemini.text
+                else "Не удалось получить ответ"
+            )
+            await send_safe_message(update, response_text)
+            log_activity(user_id, update.effective_user.username, "twitter_discuss", tweet_url[:50])
+            context.user_data.pop("pending_tweet", None)
+
+        except Exception as e:
+            await delete_safe(thinking_msg)
+            log_error("TWITTER_DISCUSS", str(e), user_id)
+            await send_safe_message(update, format_gemini_error(e, "TWITTER_DISCUSS"))
+        return
+
     # Режим YouTube превью
     if context.user_data.get("mode") == "youtube_preview_mode":
         context.user_data.pop("mode", None)
@@ -3992,6 +4125,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("active_image", None)
             active_image = None
 
+    # Проверяем активный контекст YouTube
+    active_youtube = context.user_data.get("active_youtube")
+    if active_youtube:
+        elapsed = time.time() - active_youtube["timestamp"]
+        if elapsed > IMAGE_CONTEXT_TIMEOUT:
+            context.user_data.pop("active_youtube", None)
+            active_youtube = None
+
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action="typing"
     )
@@ -4030,8 +4171,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             # Обычный текстовый чат с поиском
-            log_memory("text:before_gemini", user_id)
             chat = get_or_create_session(context)
+            
+            # Если есть активный YouTube контекст и он еще не был отправлен в сессию
+            if active_youtube and not active_youtube.get("injected"):
+                clean_text = f"[Контекст из недавнего YouTube видео:\n{active_youtube['summary']}]\n\nВопрос пользователя: {clean_text}"
+                active_youtube["injected"] = True  # Чтобы не дублировать огромный текст в каждый запрос
+
+            log_memory("text:before_gemini", user_id)
             response = await send_with_retry(chat, clean_text)
             increment_chat_message_count(context)
             log_memory("text:after_gemini", user_id)
@@ -4442,32 +4589,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- TWITTER ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
+    # Делегируем модульной функции — доступна и из handle_message
     async def _fetch_tweet_data(tweet_id: str):
-        """Пытается получить данные твита через несколько API по очереди (Fallback)"""
-        apis = [
-            f"https://api.fxtwitter.com/status/{tweet_id}",
-            f"https://api.vxtwitter.com/status/{tweet_id}",
-            f"https://api.fixupx.com/status/{tweet_id}",
-        ]
-        
-        client = await get_http_client(context.application)
-        last_error = "Unknown error"
-        
-        for url in apis:
-            try:
-                logger.debug(f"Twitter fetch attempt: {url}")
-                resp = await asyncio.wait_for(client.get(url), timeout=10.0)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if "tweet" in data:
-                        return data["tweet"], None
-                else:
-                    last_error = f"HTTP {resp.status_code} ({url.split('://')[1].split('/')[0]})"
-            except Exception as e:
-                last_error = f"{type(e).__name__}: {str(e)}"
-                logger.warning(f"Failed to fetch from {url}: {e}")
-                
-        return None, last_error
+        return await fetch_tweet_data(tweet_id, context.application)
 
     # Кнопка-заглушка из инлайн-режима — просто игнорируем
     if action == "inline_loading":
@@ -4747,69 +4871,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- TWITTER КНОПКИ ---
 
     elif action == "twitter_discuss":
-        # Обсуждение твита через Gemini.
+        # Шаг 1: спрашиваем у пользователя его вопрос, а не сразу к Gemini.
         tweet_data = context.user_data.get("pending_tweet")
         if not tweet_data:
             await query.answer("Данные устарели. Отправьте ссылку заново.", show_alert=True)
             return
 
         await query.answer()
-        tweet_url = tweet_data["url"]
-        tweet_id = tweet_data["id"]
-
-        await query.edit_message_text("💬 Загружаю данные твита...")
-
-        # Получаем данные через нашу функцию с фоллбеками
-        tw, error = await _fetch_tweet_data(tweet_id)
-        
-        tweet_text = ""
-        author = ""
-        if tw:
-            tweet_text = tw.get("text", "")
-            author = tw.get("author", {}).get("screen_name", "")
-        else:
-            logger.warning(f"Twitter discuss fetch error: {error}")
-
-        # Формируем промпт для Gemini
-        if tweet_text:
-            prompt = (
-                f'Обсудим этот твит от @{author}:\n\n"{tweet_text}"\n\n'
-                f"Ссылка: {tweet_url}"
-            )
-        else:
-            prompt = f"Обсудим этот твит: {tweet_url}"
-
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        thinking_msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id, text="⚡ Анализирую твит..."
-        )
-
-        try:
-            chat = get_or_create_session(context)
-            response_gemini = await asyncio.wait_for(
-                asyncio.to_thread(chat.send_message, prompt), timeout=TIMEOUT_MEDIUM
-            )
-            increment_chat_message_count(context)
-            await delete_safe(thinking_msg)
-
-            response_text = response_gemini.text if response_gemini and response_gemini.text else "Не удалось получить ответ"
-            formatted = format_for_telegram(response_text)
-
-            for chunk_start in range(0, len(formatted), MAX_MESSAGE_LENGTH):
-                chunk = formatted[chunk_start : chunk_start + MAX_MESSAGE_LENGTH]
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=chunk, parse_mode="HTML")
-
-            log_activity(user_id, query.from_user.username, "twitter_discuss", tweet_url[:50])
-            context.user_data.pop("pending_tweet", None)
-
-        except Exception as e:
-            await delete_safe(thinking_msg)
-            log_error("TWITTER_DISCUSS", str(e), user_id)
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id, 
-                text=format_gemini_error(e, "TWITTER_DISCUSS"), 
-                parse_mode="HTML"
-            )
+        # Переключаем режим — следующее сообщение пользователя будет вопросом о твите
+        context.user_data["mode"] = "twitter_question_mode"
+        await query.edit_message_text("✍️ Напишите ваш вопрос о твите:")
 
     elif action == "twitter_send":
         tweet_data = context.user_data.get("pending_tweet")
