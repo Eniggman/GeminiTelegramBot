@@ -1,0 +1,20 @@
+[Unit]
+Description=Telegram Gemini Bot
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/FolderBot
+EnvironmentFile=/home/ubuntu/FolderBot/.env
+ExecStart=/home/ubuntu/FolderBot/venv/bin/python /home/ubuntu/FolderBot/googlebot.py
+Restart=always
+RestartSec=10
+
+# Лимиты ресурсов для 1GB RAM
+MemoryMax=650M
+MemoryHigh=520M
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target

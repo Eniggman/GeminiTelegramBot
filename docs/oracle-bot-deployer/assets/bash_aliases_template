@@ -1,0 +1,12 @@
+# --- БОТ ---
+alias logs='sudo journalctl -u googlebot -f'
+alias logsn='sudo journalctl -u googlebot -n 30 --no-pager'
+alias restart='sudo systemctl restart googlebot && systemctl status googlebot'
+alias stop='sudo systemctl stop googlebot'
+alias status='systemctl status googlebot'
+
+# --- СИСТЕМА ---
+alias ram='free -h'
+alias cpu='ps -o pid,user,%cpu,%mem,rss,cmd -C python3'
+alias bot='cd /home/ubuntu/FolderBot'
+alias ..='cd ..'

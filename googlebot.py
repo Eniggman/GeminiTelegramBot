@@ -187,6 +187,7 @@ console_handler.setLevel(logging.ERROR)
 # Файловый хендлер с ротацией (опционально)
 handlers = [console_handler]
 if LOG_TO_FILE:
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     file_handler = RotatingFileHandler(
         LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
     )
