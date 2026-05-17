@@ -39,6 +39,7 @@
 | `пр` / `перевод`           | 🌐 Перевод текста/фото      | `_process_translation_mode()` / `handle_photo()` | `пр hello`                        |
 | `ю` / `ютуб`                   | 📺 YouTube саммари                    | `_process_youtube_mode()`                          | `ю https://youtu.be/...`           |
 | `превью` / `пре`           | 🖼️ YouTube превью                    | `get_youtube_preview()`                            | `превью https://youtu.be/...` |
+| `тв` / `твиттер`           | 🐦 Twitter/X загрузка             | `_process_twitter_link()` / inline                 | `тв https://x.com/...`        |
 | `.`                                   | 🧹 Сброс режима                   | `_process_exit_commands()`                         | `.`                                 |
 | `выход` / `exit`               | ⏹️ Выход из режима            | `_process_exit_commands()`                         | `выход`                        |
 

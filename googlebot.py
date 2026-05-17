@@ -34,6 +34,7 @@ from telegram import (
     InlineQueryResultsButton,
     InputMediaPhoto,
     InputTextMessageContent,
+    ReplyKeyboardRemove,
     Update,
 )
 from telegram.constants import ChatType
@@ -74,7 +75,7 @@ if not ADMIN_ID:
     print("ВНИМАНИЕ: ADMIN_ID не задан в .env! Админ-функции будут недоступны.")
 
 # Базовые настройки
-MEMORY_TIMEOUT = 60 * 60  # 60 минут неактивности для обычного разговора
+MEMORY_TIMEOUT = 15 * 60  # 15 минут неактивности для обычного разговора
 MEMORY_DEBUG = os.getenv("MEMORY_DEBUG", "0") == "1"
 MEMORY_MONITOR_INTERVAL = int(os.getenv("MEMORY_MONITOR_INTERVAL", "10"))
 MAX_RETRIES = 2
@@ -84,10 +85,10 @@ CLEANUP_INTERVAL = 60
 PHOTO_TASK_TTL = 15 * 60
 PENDING_ALBUM_TTL = 10 * 60
 PENDING_TWEET_TTL = 10 * 60
-ACTIVE_IMAGE_TTL = 30 * 60
-LAST_GENERATED_PHOTO_TTL = 30 * 60
-LAST_EDIT_DATA_TTL = 30 * 60
-CHAT_SESSION_IDLE_TTL = 60 * 60
+ACTIVE_IMAGE_TTL = 15 * 60
+LAST_GENERATED_PHOTO_TTL = 15 * 60
+LAST_EDIT_DATA_TTL = 15 * 60
+CHAT_SESSION_IDLE_TTL = 15 * 60
 TEMP_FILE_TTL = 30 * 60
 HTTP_CLIENT_TIMEOUT = 10.0
 
@@ -885,7 +886,7 @@ def cleanup_expired_user_data(user_data: dict, current_time: float) -> dict[str,
         and last_activity
         and current_time - last_activity > CHAT_SESSION_IDLE_TTL
     ):
-        user_data.pop("chat_session", None)
+        destroy_session(user_data)
         cleaned["chat_session"] += 1
 
     return cleaned
@@ -929,7 +930,7 @@ async def cleanup_loop(app: Application) -> None:
             active_sessions.sort(key=lambda item: item[1])
             overflow = len(active_sessions) - MAX_ACTIVE_CHAT_SESSIONS
             for _, _, user_data in active_sessions[:overflow]:
-                user_data.pop("chat_session", None)
+                destroy_session(user_data)
                 cleaned["chat_session"] += 1
 
         cleanup_stats = bot_stats["cleanup"]
@@ -940,18 +941,43 @@ async def cleanup_loop(app: Application) -> None:
 
         total_cleaned = sum(cleaned.values())
         if total_cleaned:
-            logger.info(f"Cleanup removed {total_cleaned} items: {cleaned}")
+            # После удаления сессий принудительно вызываем сборку мусора
+            gc.collect()
+            logger.info(f"Cleanup removed {total_cleaned} items. RSS now: {get_process_rss_mb():.1f} MB")
             log_memory("cleanup:done")
 
 
 # --- ФУНКЦИЯ СБРОСА КОНТЕКСТА ---
+
+
+def destroy_session(user_data: dict) -> None:
+    """
+    Явно уничтожает сессию Gemini, очищая историю для высвобождения RAM.
+    Принимает словарь user_data напрямую для универсальности (используется и в хендлерах, и в cleanup_loop).
+    """
+    chat = user_data.pop("chat_session", None)
+    if chat:
+        try:
+            # Очищаем историю — самый тяжелый кусок данных в ChatSession
+            chat.history = []
+            logger.debug("History cleared for a session before destruction.")
+        except Exception:
+            pass
+    
+    # Обнуляем счетчики и контекстные медиа
+    user_data["chat_message_count"] = 0
+    user_data.pop("active_image", None)
+    user_data.pop("active_youtube", None)
+
+
 def reset_session(context: ContextTypes.DEFAULT_TYPE) -> object:
     """
     Создаёт новую Gemini chat session.
-
-    Pro-режим: gemini-3-flash-preview без tools, потому что с tools он даёт 429.
-    Flash-режим: gemini-2.5-flash с Google Search + URL context.
+    Перед созданием уничтожает старую сессию для экономии памяти.
     """
+    # Агрессивная очистка старой сессии
+    destroy_session(context.user_data)
+
     model_key = get_model_key(context)
     instruction = (
         SYSTEM_INSTRUCTION_PRO if model_key == "pro" else SYSTEM_INSTRUCTION_FLASH
@@ -971,13 +997,10 @@ def reset_session(context: ContextTypes.DEFAULT_TYPE) -> object:
 
     context.user_data["chat_session"] = chat
     context.user_data["last_activity"] = time.time()
-    context.user_data["chat_message_count"] = 0
-
-    # Сбрасываем режим при сбросе сессии
-    context.user_data.pop("mode", None)
-
-    # Сбрасываем активное изображение
-    context.user_data.pop("active_image", None)
+    
+    # Режим сбрасываем только если это не специальный режим (например, YouTube)
+    if context.user_data.get("mode") not in ("youtube_mode", "translate", "image_gen"):
+        context.user_data.pop("mode", None)
 
     return chat
 
@@ -1856,7 +1879,8 @@ async def create_summary(text: str) -> str:
                     model=MODELS["flash"],
                     contents=prompt,
                     config=genai_types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION_FLASH
+                        system_instruction=SYSTEM_INSTRUCTION_FLASH,
+                        tools=SEARCH_TOOLS
                     ),
                 )
             ),
@@ -1947,10 +1971,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     reset_session(context)
     model_key = get_model_key(context)
+    model_id = MODELS.get(model_key, "unknown")
     model_icon = "💎" if model_key == "pro" else "⚡"
+    
     await update.message.reply_text(
-        f"🔄 Контекст сброшен!\n{model_icon} Модель: <b>{model_key.upper()}</b>",
+        f"🔄 Контекст сброшен!\n{model_icon} Модель: <b>{model_key.upper()}</b>\nID: <code>{model_id}</code>",
         parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove()
     )
 
 
@@ -2165,12 +2192,14 @@ async def set_pro_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["model"] = "pro"
     reset_session(context)
+    model_id = MODELS.get("pro", "unknown")
 
     await update.message.reply_text(
-        "💎 <b>Gemini Pro</b>\n\n"
-        "Установлена мощная модель Pro.\n"
-        "⚠️ _Примечание: если лимиты Free Tier исчерпаны, бот вернет ошибку квоты._",
+        f"✅ Модель переключена на <b>Pro</b>\n"
+        f"Настоящая модель: <code>{model_id}</code>\n\n"
+        "⚠️ Установлена мощная модель для глубокого анализа.",
         parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove()
     )
 
 
@@ -2180,8 +2209,13 @@ async def set_flash_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("⛔️ Нет доступа.")
     context.user_data["model"] = "flash"
     reset_session(context)
+    model_id = MODELS.get("flash", "unknown")
     await update.message.reply_text(
-        f"⚡ Модель: <b>Gemini Flash</b>\n\n{MODELS['flash']}", parse_mode="HTML"
+        f"✅ Модель переключена на <b>Flash</b>\n"
+        f"Настоящая модель: <code>{model_id}</code>\n"
+        f"🌐 Подключенные инструменты: Google Search, URL Context", 
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove()
     )
 
 
@@ -2557,6 +2591,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 ),
                                 ocr_prompt,
                             ],
+                            config=genai_types.GenerateContentConfig(
+                                system_instruction="Ты — переводчик. Твоя задача — точно перевести текст с изображения на русский язык.",
+                            )
                         )
                     ),
                     timeout=60.0,
@@ -2696,7 +2733,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ],
                 [
                     InlineKeyboardButton(
-                        "📝 Добавить описание", callback_data="photo_add_caption"
+                        "📝 Добавить вопрос", callback_data="photo_add_caption"
                     )
                 ],
             ]
@@ -2970,7 +3007,7 @@ async def process_album_delayed(
             ],
             [
                 InlineKeyboardButton(
-                    "📝 Добавить описание", callback_data="photo_add_caption"
+                    "📝 Добавить вопрос", callback_data="photo_add_caption"
                 )
             ],
         ]
@@ -3045,7 +3082,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Скачиваем файл во временный файл, затем читаем в bytes только перед Gemini.
-        log_memory("document:before_download", user_id)
+        log_memory("docuuad", user_id)
         suffix = os.path.splitext(document.file_name or "")[1]
         file = await document.get_file()
         document_temp_path = await download_telegram_file_to_temp(file, suffix)
@@ -3063,6 +3100,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         ),
                         prompt,
                     ],
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION_FLASH,
+                        tools=SEARCH_TOOLS
+                    ) if model_key == "flash" else None
                 )
             ),
             timeout=120.0,  # Больше времени для документов
@@ -3255,22 +3296,44 @@ async def _process_photo_analyze_prompt(
     try:
         photos_bytes = await resolve_media_items_to_bytes(context.bot, photo_items)
         log_memory("photo_analyze_prompt:after_download", user_id)
+
+        # Объединяем оригинальную подпись поста и новый вопрос пользователя
+        original_caption = photo_task.get("caption", "").strip()
+        context_text = ""
+        if original_caption:
+            context_text += f"Описание поста: {original_caption}\n\n"
+        context_text += f"Вопрос пользователя: {prompt}"
+
+        # Инструкция для фактчекинга и поиска
+        analysis_instruction = (
+            "Ты — аналитик новостей и фактчекер. Проанализируй предоставленные изображения и описание поста. "
+            "Используй Google Search, чтобы проверить достоверность этой информации, найти первоисточник или дополнительные подробности. "
+            "Твоя задача — не просто сравнить фото и текст, а дать пользователю глубокий и проверенный ответ на его вопрос.\n\n"
+            "Если информация в посте кажется ложной или устаревшей — обязательно укажи на это."
+        )
+
         contents = [
             genai_types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")
             for img_bytes in photos_bytes
         ] + [
-            "Проанализируй изображение(я) и текст пользователя как единый контекст. "
-            "Дай точный и практичный ответ.\n\n"
-            f"Текст пользователя: {prompt}"
+            f"{analysis_instruction}\n\n{context_text}"
         ]
+
+        # Создаем конфиг с инструментами поиска
+        config = genai_types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION_FLASH,
+            tools=SEARCH_TOOLS
+        )
 
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: gemini_client.models.generate_content(
-                    model=MODELS["flash"], contents=contents
+                    model=MODELS["flash"], 
+                    contents=contents,
+                    config=config
                 )
             ),
-            timeout=TIMEOUT_SHORT,
+            timeout=TIMEOUT_MEDIUM,
         )
 
         await thinking_msg.delete()
@@ -3384,6 +3447,9 @@ async def _process_fast_commands(
                         lambda: gemini_client.models.generate_content(
                             model=MODELS.get("lite", MODELS["flash"]),
                             contents=prompt_text,
+                            config=genai_types.GenerateContentConfig(
+                                system_instruction="Ты — профессиональный переводчик.",
+                            )
                         )
                     ),
                     timeout=TIMEOUT_SHORT,
@@ -3537,19 +3603,30 @@ async def _process_fast_commands(
             return True
 
     # Переключение моделей (Про / Флэш)
-    if lower_text in ["п", "про", "pro"]:
+    if lower_text in ["п", "про", "pro"] or (lower_text.startswith("✅") and "pro" in lower_text.lower()):
         context.user_data["model"] = "pro"
         reset_session(context)
+        model_id = MODELS.get("pro", "unknown")
         await update.message.reply_text(
-            "Pro 💎", parse_mode="HTML", reply_to_message_id=update.message.message_id
+            f"✅ Модель переключена на <b>Pro</b>\n"
+            f"Настоящая модель: <code>{model_id}</code>", 
+            parse_mode="HTML", 
+            reply_to_message_id=update.message.message_id,
+            reply_markup=ReplyKeyboardRemove()
         )
         return True
 
-    if lower_text in ["ф", "флеш", "flash"]:
+    if lower_text in ["ф", "флеш", "flash"] or (lower_text.startswith("✅") and "flash" in lower_text.lower()) or "gemini-2.5-flash" in lower_text:
         context.user_data["model"] = "flash"
         reset_session(context)
+        model_id = MODELS.get("flash", "unknown")
         await update.message.reply_text(
-            "Flash ⚡", parse_mode="HTML", reply_to_message_id=update.message.message_id
+            f"✅ Модель переключена на <b>Flash</b>\n"
+            f"Настоящая модель: <code>{model_id}</code>\n"
+            f"🌐 Подключенные инструменты: Google Search, URL Context", 
+            parse_mode="HTML", 
+            reply_to_message_id=update.message.message_id,
+            reply_markup=ReplyKeyboardRemove()
         )
         return True
 
@@ -3790,6 +3867,10 @@ async def _process_reply_to_photo(
                         ),
                         prompt,
                     ],
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION_FLASH,
+                        tools=SEARCH_TOOLS
+                    ) if model_key == "flash" else None
                 )
             ),
             timeout=60.0,
@@ -3842,7 +3923,12 @@ async def _process_translation_mode(
         response = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: gemini_client.models.generate_content(
-                    model=MODELS.get("lite", MODELS["flash"]), contents=prompt_text
+                    model=MODELS.get("lite", MODELS["flash"]), 
+                    contents=prompt_text,
+                    config=genai_types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION_FLASH,
+                        tools=SEARCH_TOOLS
+                    )
                 )
             ),
             timeout=TIMEOUT_SHORT,
@@ -4166,6 +4252,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             ),
                             clean_text,
                         ],
+                        config=genai_types.GenerateContentConfig(
+                            system_instruction=SYSTEM_INSTRUCTION_FLASH,
+                            tools=SEARCH_TOOLS
+                        ) if model_key == "flash" else None
                     )
                 ),
                 timeout=TIMEOUT_SHORT,
@@ -4238,6 +4328,10 @@ def _parse_inline_command(text: str) -> tuple[str, str]:
     if cmd_word in ("пре", "превью"):
         return ("preview", arg)
 
+    # Twitter: тв / твиттер
+    if cmd_word in ("тв", "твиттер"):
+        return ("twitter", arg)
+
     # Всё остальное — Gemini
     return ("gemini", text)
 
@@ -4282,9 +4376,9 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
             InlineQueryResultArticle(
                 id=str(uuid.uuid4()),
                 title="💡 Введите вопрос или команду",
-                description="пр <текст> · ю <ссылка> · превью <ссылка> · или просто вопрос",
+                description="пр <текст> · ю <ссылка> · превью <ссылка> · тв <ссылка> · или вопрос",
                 input_message_content=InputTextMessageContent(
-                    message_text="💡 Команды: пр, ю, превью — или просто вопрос",
+                    message_text="💡 Команды: пр, ю, превью, тв — или просто вопрос",
                     parse_mode="HTML",
                 ),
                 thumbnail_url=avatar_url,
@@ -4419,6 +4513,52 @@ async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer(results, cache_time=0)
         return
 
+    # --- TWITTER ---
+    if cmd_type == "twitter":
+        if not cmd_arg:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid.uuid4()),
+                    title="🐦 Twitter/X",
+                    description="Введите: тв <ссылка на твит>",
+                    input_message_content=InputTextMessageContent(
+                        message_text="🐦 Используйте: @bot тв <ссылка>"
+                    ),
+                    thumbnail_url=avatar_url,
+                )
+            ]
+            await query.answer(results, cache_time=30)
+            return
+
+        match = TWITTER_PATTERN.search(cmd_arg)
+        if not match:
+            results = [
+                InlineQueryResultArticle(
+                    id=str(uuid.uuid4()),
+                    title="❌ Некорректная ссылка",
+                    description="Не удалось распознать ссылку на Twitter/X",
+                    input_message_content=InputTextMessageContent(
+                        message_text="❌ Не удалось распознать ссылку на Twitter/X"
+                    ),
+                    thumbnail_url=avatar_url,
+                )
+            ]
+            await query.answer(results, cache_time=30)
+            return
+
+        results = [
+            InlineQueryResultPhoto(
+                id=str(uuid.uuid4()),
+                photo_url=BLACK_SQUARE_URL,
+                thumbnail_url=BLACK_SQUARE_URL,
+                title=f"🐦 Twitter: {cmd_arg[:40]}...",
+                caption=f"⏳ Загружаю твит...\n{cmd_arg}",
+                reply_markup=loading_keyboard,
+            )
+        ]
+        await query.answer(results, cache_time=0)
+        return
+
     # --- GEMINI (по умолчанию) ---
     results = [
         InlineQueryResultArticle(
@@ -4463,7 +4603,11 @@ async def handle_chosen_inline_result(
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     lambda: gemini_client.models.generate_content(
-                        model=MODELS["flash"], contents=prompt_text
+                        model=MODELS["flash"], 
+                        contents=prompt_text,
+                        config=genai_types.GenerateContentConfig(
+                            system_instruction="Ты — профессиональный переводчик.",
+                        )
                     )
                 ),
                 timeout=TIMEOUT_SHORT,
@@ -4526,6 +4670,79 @@ async def handle_chosen_inline_result(
                     reply_markup=InlineKeyboardMarkup([]),
                 )
             log_activity(user.id, user.username, "inline_preview", cmd_arg[:30])
+            return
+
+        # --- TWITTER ---
+        if cmd_type == "twitter" and cmd_arg:
+            match = TWITTER_PATTERN.search(cmd_arg)
+            if not match:
+                await context.bot.edit_message_caption(
+                    inline_message_id=inline_message_id,
+                    caption="❌ Неверная ссылка на Twitter/X",
+                    reply_markup=InlineKeyboardMarkup([]),
+                )
+                return
+
+            tweet_id = match.group(1)
+            tweet_url = match.group(0)
+
+            tw, error = await fetch_tweet_data(tweet_id, context.application)
+            if not tw:
+                await context.bot.edit_message_caption(
+                    inline_message_id=inline_message_id,
+                    caption=f"❌ Не удалось получить данные твита.\nОшибка: <code>{error}</code>",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([]),
+                )
+                return
+
+            tweet_text = tw.get("text", "")
+            photos = []
+
+            media = tw.get("media", {})
+            if media:
+                photos = [p["url"] for p in media.get("photos", [])]
+
+            author_name = tw.get("author", {}).get("name", "")
+            author_handle = tw.get("author", {}).get("screen_name", "")
+
+            caption_parts = []
+            
+            # Строим заголовок в формате: 👤 Имя / @username (где в @username вшита ссылка)
+            header_elements = []
+            if author_name:
+                header_elements.append(f"<b>{escape_html(author_name)}</b>")
+            if author_handle:
+                header_elements.append(f'<a href="{tweet_url}">@{escape_html(author_handle)}</a>')
+            else:
+                header_elements.append(f'<a href="{tweet_url}">Пост</a>')
+            
+            header = f"👤 {' / '.join(header_elements)}:"
+            caption_parts.append(header)
+
+            if tweet_text:
+                caption_parts.append(escape_html(tweet_text))
+
+            caption = "\n\n".join(caption_parts)[:1024]
+
+            if not photos:
+                await context.bot.edit_message_caption(
+                    inline_message_id=inline_message_id,
+                    caption=caption or "Медиа не найдено.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([]),
+                )
+            else:
+                await context.bot.edit_message_media(
+                    inline_message_id=inline_message_id,
+                    media=InputMediaPhoto(
+                        media=photos[0],
+                        caption=caption,
+                        parse_mode="HTML",
+                    ),
+                    reply_markup=InlineKeyboardMarkup([]),
+                )
+            log_activity(user.id, user.username, "inline_twitter", cmd_arg[:30])
             return
 
         # --- GEMINI (по умолчанию) ---
@@ -4662,10 +4879,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     lambda: gemini_client.models.generate_content(
-                        model=MODELS[model_key], contents=contents
+                        model=MODELS[model_key], 
+                        contents=contents,
+                        config=genai_types.GenerateContentConfig(
+                            system_instruction=(
+                                "Ты — аналитик новостей и фактчекер. Проанализируй предоставленные изображения. "
+                                "Используй Google Search, чтобы проверить достоверность этой информации, найти подробности. "
+                                "Дай проверенный и глубокий ответ."
+                            ) if model_key == "flash" else None,
+                            tools=SEARCH_TOOLS if model_key == "flash" else None
+                        )
                     )
                 ),
-                timeout=60.0,
+                timeout=120.0,
             )
 
             response_text = (
@@ -4709,7 +4935,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "photo_add_caption":
         context.user_data["mode"] = "awaiting_photo_analyze_prompt"
-        await query.edit_message_text("📝 Жду описания")
+        await query.edit_message_text("📝 Жду вопрос к фото")
 
     elif action == "img_regen":
         # Перегенерация картинки по сохранённому промпту
@@ -4908,37 +5134,54 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             tweet_text = tw.get("text", "")
-            author = tw.get("author", {}).get("screen_name", "")
-            author_name = tw.get("author", {}).get("name", "")
-            likes = tw.get("likes", 0)
-            retweets = tw.get("retweets", 0)
             photos = []
 
             media = tw.get("media", {})
             if media:
                 photos = [p["url"] for p in media.get("photos", [])]
 
+            author_name = tw.get("author", {}).get("name", "")
+            author_handle = tw.get("author", {}).get("screen_name", "")
+
             caption_parts = []
-            if author:
-                caption_parts.append(f"🐦 {author_name} (@{author})")
+            
+            # Строим заголовок в формате: 👤 Имя / @username (где в @username вшита ссылка)
+            header_elements = []
+            if author_name:
+                header_elements.append(f"<b>{escape_html(author_name)}</b>")
+            if author_handle:
+                header_elements.append(f'<a href="{tweet_url}">@{escape_html(author_handle)}</a>')
+            else:
+                header_elements.append(f'<a href="{tweet_url}">Пост</a>')
+            
+            header = f"👤 {' / '.join(header_elements)}:"
+            caption_parts.append(header)
+
             if tweet_text:
-                caption_parts.append(tweet_text)
-            if likes or retweets:
-                stats = []
-                if likes: stats.append(f"❤️ {likes:,}")
-                if retweets: stats.append(f"🔁 {retweets:,}")
-                caption_parts.append(" · ".join(stats))
-            caption_parts.append(tweet_url)
+                caption_parts.append(escape_html(tweet_text))
 
             caption = "\n\n".join(caption_parts)[:1024]
 
             if not photos:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=caption or "Медиа не найдено.")
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=caption or "Медиа не найдено.",
+                    parse_mode="HTML",
+                )
             elif len(photos) == 1:
-                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=photos[0], caption=caption)
+                await context.bot.send_photo(
+                    chat_id=update.effective_chat.id,
+                    photo=photos[0],
+                    caption=caption,
+                    parse_mode="HTML",
+                )
             else:
                 media_group = [
-                    InputMediaPhoto(media=url, caption=caption if i == 0 else None)
+                    InputMediaPhoto(
+                        media=url,
+                        caption=caption if i == 0 else None,
+                        parse_mode="HTML",
+                    )
                     for i, url in enumerate(photos[:10])
                 ]
                 await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media_group)
@@ -4968,6 +5211,11 @@ if __name__ == "__main__":
 
 async def post_init(app: Application):
     """Настройка команд меню и уведомление админа после старта"""
+    # Обновляем команды меню с актуальными ID моделей
+    latest = get_latest_models()
+    pro_id = latest.get("pro", "gemini-3-flash-preview")
+    flash_id = latest.get("flash", "gemini-2.5-flash")
+
     await app.bot.set_my_commands(
         [
             ("start", "🔄 Сбросить контекст"),
@@ -4975,8 +5223,8 @@ async def post_init(app: Application):
             ("youtube", "📺 YouTube Саммари"),
             ("imagepro", "🎨💎Image Pro"),
             ("imageflash", "🎨⚡Image Flash"),
-            ("1model", "💎Text Gemini Pro"),
-            ("2model", "⚡Text Gemini Flash"),
+            ("1model", f"💎 Pro [{pro_id}]"),
+            ("2model", f"⚡ Flash [{flash_id}]"),
             ("help", "❓ Справка"),
         ]
     )
