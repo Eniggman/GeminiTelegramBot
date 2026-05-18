@@ -2466,6 +2466,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     media_group_id = update.message.media_group_id
     log_memory("photo:start", user_id)
 
+    # --- Обработка пересланных сообщений ---
+    if getattr(update.message, "forward_origin", None):
+        if media_group_id and context.user_data.get("last_forwarded_album") == media_group_id:
+            return
+
+        if media_group_id:
+            context.user_data["last_forwarded_album"] = media_group_id
+
+        context.user_data["forwarded_context"] = {
+            "type": "photo",
+            "photo_id": update.message.photo[-1].file_id,
+            "text": caption
+        }
+        await update.message.reply_text("✅ Принято. Жду ваш вопрос.")
+        return
+
     # --- Обработка альбомов (media_group) ---
     # Если это часть альбома — собираем все фото
     if media_group_id:
@@ -3321,7 +3337,7 @@ async def _process_photo_analyze_prompt(
 
         # Создаем конфиг с инструментами поиска
         config = genai_types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION_FLASH,
+            system_instruction=None,  # Отключаем короткий флеш-промт, чтобы работал только промт аналитика
             tools=SEARCH_TOOLS
         )
 
@@ -4022,6 +4038,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⛔️ Нет доступа.")
         return
 
+    # --- Обработка пересланных сообщений ---
+    if getattr(update.message, "forward_origin", None):
+        context.user_data["forwarded_context"] = {
+            "type": "text",
+            "text": text
+        }
+        await update.message.reply_text("✅ Текст принят. Жду ваш вопрос.")
+        return
+
     bot_username = context.bot.username
 
     # 3. Проверка групповых чатов (reply/mention)
@@ -4035,6 +4060,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat_type != ChatType.PRIVATE and not (is_reply_to_bot or is_mentioned):
         return
+
+    # --- Склейка пересланного контекста ---
+    forwarded_data = context.user_data.get("forwarded_context")
+    if forwarded_data:
+        saved_text = forwarded_data.get("text", "")
+        saved_photo = forwarded_data.get("photo_id")
+        
+        final_prompt = f"Контекст:\n{saved_text}\n\nВопрос: {text}"
+        context.user_data.pop("forwarded_context", None)
+        
+        if saved_photo:
+            context.user_data["photo_task"] = {
+                "photos": [make_telegram_media_ref(saved_photo)],
+                "caption": saved_text,
+                "message_id": update.message.message_id,
+                "timestamp": time.time(),
+            }
+            context.user_data["mode"] = "awaiting_photo_analyze_prompt"
+            # Для анализа фото _process_photo_analyze_prompt читает update.message.text (он содержит сам вопрос)
+            return await _process_photo_analyze_prompt(update, context, user_id)
+        else:
+            text = final_prompt
 
     # 4. Подготовка текста
     stripped = text.strip()
