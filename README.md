@@ -1,3 +1,5 @@
+> **Версия:** 1.0 • **Последнее обновление:** 2026-09-20
+
 # 🤖 Google-Gemini Telegram Bot
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
