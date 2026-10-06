@@ -282,3 +282,9 @@ python googlebot.py
 ## 9. 🧩 Структура проекта
 
 Подробная схема файлов и архитектуры — в `PROJECT_STRUCTURE.md`.
+
+---
+
+## English summary
+
+A self-hosted Telegram bot powered by Google Gemini (google-genai SDK) and python-telegram-bot, designed to run on the Gemini API free tier and a small free cloud server (Oracle Cloud, Ubuntu, 1 GB RAM). It supports chat with short-term context, image understanding, image generation and editing, Google Search grounding, PDF/TXT/CSV/JSON document analysis, voice messages, YouTube video summaries, X/Twitter media and inline mode; you need your own Telegram bot token and Gemini API key. The repo also ships an AI agent skill (docs/oracle-bot-deployer/SKILL.md) for step-by-step deployment of the bot to an Oracle Cloud server: give that file to your AI agent or copy the folder into its skills directory.
